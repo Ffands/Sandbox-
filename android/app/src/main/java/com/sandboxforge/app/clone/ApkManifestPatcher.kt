@@ -80,7 +80,7 @@ object ApkManifestPatcher {
         var rewrittenProviders = 0
         val componentTags = setOf("activity", "activity-alias", "service", "receiver", "provider")
 
-        appEl.listElements().forEach { child ->
+        appEl.childElementsList().forEach { child ->
             val tag = child.name
             if (tag in componentTags) {
                 resolveRelativeClassAttribute(child, ATTR_ID_NAME, originalPackage)
@@ -127,7 +127,7 @@ object ApkManifestPatcher {
 
         // 4. Rewrite custom <permission> declarations & matching <uses-permission>
         val customPermissions = linkedMapOf<String, String>()
-        manifestEl.listElements().forEach { child ->
+        manifestEl.childElementsList().forEach { child ->
             if (child.name == "permission") {
                 val nameAttr = child.searchAttributeByResourceId(ATTR_ID_NAME)
                 val permName = nameAttr?.valueAsString
@@ -143,7 +143,7 @@ object ApkManifestPatcher {
             }
         }
         if (customPermissions.isNotEmpty()) {
-            manifestEl.listElements().forEach { child ->
+            manifestEl.childElementsList().forEach { child ->
                 if (child.name == "uses-permission") {
                     val nameAttr = child.searchAttributeByResourceId(ATTR_ID_NAME)
                     val oldPerm = nameAttr?.valueAsString
@@ -232,11 +232,11 @@ object ApkManifestPatcher {
     }
 
     private fun isLauncherComponent(component: ResXmlElement): Boolean {
-        for (child in component.listElements()) {
+        for (child in component.childElementsList()) {
             if (child.name != "intent-filter") continue
             var hasMain = false
             var hasLauncher = false
-            for (filterChild in child.listElements()) {
+            for (filterChild in child.childElementsList()) {
                 val n = filterChild.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString
                 if (filterChild.name == "action" && n == "android.intent.action.MAIN") {
                     hasMain = true
@@ -253,14 +253,23 @@ object ApkManifestPatcher {
     }
 
     private fun removeLauncherCategory(component: ResXmlElement) {
-        for (child in component.listElements()) {
+        for (child in component.childElementsList()) {
             if (child.name != "intent-filter") continue
-            val toRemove = child.listElements().filter { filterChild ->
+            val toRemove = child.childElementsList().filter { filterChild ->
                 filterChild.name == "category" &&
                     filterChild.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString ==
                     "android.intent.category.LAUNCHER"
             }
             toRemove.forEach { it.removeSelf() }
         }
+    }
+
+    private fun ResXmlElement.childElementsList(): List<ResXmlElement> {
+        val result = mutableListOf<ResXmlElement>()
+        val iter = this.getElements()
+        while (iter.hasNext()) {
+            result.add(iter.next())
+        }
+        return result
     }
 }
