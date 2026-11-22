@@ -1,6 +1,9 @@
 package com.sandboxforge.app
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -31,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import com.sandboxforge.app.logging.AppLogger
 import com.sandboxforge.app.logging.LogLevel
@@ -38,6 +42,7 @@ import com.sandboxforge.app.ui.ContainerScreen
 import com.sandboxforge.app.ui.FileManagerScreen
 import com.sandboxforge.app.ui.LogScreen
 import com.sandboxforge.app.ui.SandboxViewModel
+import com.sandboxforge.app.ui.UiActionEffect
 import com.sandboxforge.app.ui.theme.BgDark
 import com.sandboxforge.app.ui.theme.SandboxForgeTheme
 import com.sandboxforge.app.ui.theme.SurfaceDark
@@ -55,11 +60,17 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshContainerApps()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SandboxRootScreen(viewModel: SandboxViewModel) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
     val logEntries by AppLogger.entries.collectAsState()
     val crashSummary by AppLogger.lastCrashSummary.collectAsState()
@@ -71,6 +82,32 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
     val errorCount = remember(logEntries, crashSummary) {
         logEntries.count { it.level == LogLevel.ERROR || it.level == LogLevel.CRASH } +
             if (!crashSummary.isNullOrBlank()) 1 else 0
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.effects.collect { effect ->
+            when (effect) {
+                is UiActionEffect.LaunchInstallConfirmation -> {
+                    runCatching {
+                        context.startActivity(effect.intent)
+                    }.onFailure { err ->
+                        AppLogger.e("MainActivity", "Не удалось открыть диалог установки", err)
+                    }
+                }
+
+                UiActionEffect.RequestUnknownSourcesPermission -> {
+                    val settingsIntent = Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:${context.packageName}")
+                    )
+                    runCatching {
+                        context.startActivity(settingsIntent)
+                    }.onFailure { err ->
+                        AppLogger.e("MainActivity", "Не удалось открыть настройки установки APK", err)
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(uiState.statusBanner) {
@@ -139,9 +176,14 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
             when (selectedTab) {
                 0 -> ContainerScreen(
                     uiState = uiState,
+                    loadContainerIcon = { pkg -> viewModel.getContainerIcon(pkg) },
+                    loadHostIcon = { pkg -> viewModel.getHostIcon(pkg) },
+                    onToggleHideLauncher = { hide -> viewModel.setHideCloneFromLauncher(hide) },
+                    onSelectEngine = { pkg, mode -> viewModel.setSelectedEngine(pkg, mode) },
                     onOpenDeviceImport = { includeSystem -> viewModel.loadDeviceApps(includeSystem) },
                     onSelectDeviceApp = { deviceApp -> viewModel.importDeviceApp(deviceApp) },
                     onInstallApkUri = { uri -> viewModel.installExternalApk(uri) },
+                    onLaunchOrBuildClone = { app -> viewModel.buildAndInstallOrLaunchClone(app) },
                     onInspectApp = { app -> viewModel.inspectContainerApp(app) },
                     onDismissReport = { viewModel.dismissInspectionReport() },
                     onOpenAppFolder = { pkg ->

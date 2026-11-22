@@ -5,23 +5,24 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-val BgDark = Color(0xFF0F1115)
-val SurfaceDark = Color(0xFF171A21)
-val SurfaceElevated = Color(0xFF1F2430)
-val BorderDark = Color(0xFF282E3D)
-val AccentBlue = Color(0xFF3B82F6)
+// Crisper, higher-contrast dark engineering palette (Step 2 UI polish)
+val BgDark = Color(0xFF0A0C11)
+val SurfaceDark = Color(0xFF141822)
+val SurfaceElevated = Color(0xFF1D2433)
+val BorderDark = Color(0xFF334155)
+val AccentBlue = Color(0xFF4F8BFF)
 val AccentCyan = Color(0xFF22D3EE)
-val StatusGreen = Color(0xFF22C55E)
-val StatusAmber = Color(0xFFF59E0B)
-val StatusRed = Color(0xFFEF4444)
-val TextPrimary = Color(0xFFF3F4F6)
-val TextMuted = Color(0xFF9CA3AF)
+val StatusGreen = Color(0xFF34D399)
+val StatusAmber = Color(0xFFFBBF24)
+val StatusRed = Color(0xFFF87171)
+val TextPrimary = Color(0xFFF8FAFC)
+val TextMuted = Color(0xFFB6C2D6)
 
 private val SandboxColorScheme = darkColorScheme(
     primary = AccentBlue,
     onPrimary = Color.White,
     secondary = AccentCyan,
-    onSecondary = Color(0xFF041317),
+    onSecondary = Color(0xFF03151B),
     background = BgDark,
     onBackground = TextPrimary,
     surface = SurfaceDark,
@@ -30,7 +31,7 @@ private val SandboxColorScheme = darkColorScheme(
     onSurfaceVariant = TextMuted,
     outline = BorderDark,
     error = StatusRed,
-    onError = Color.White
+    onError = Color(0xFF1F0707)
 )
 
 @Composable

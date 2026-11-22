@@ -1,28 +1,28 @@
 package com.sandboxforge.app.container
 
+import com.sandboxforge.app.clone.CloneInstaller
+import com.sandboxforge.app.clone.EngineAdvisor
 import com.sandboxforge.app.logging.AppLogger
 import java.io.File
 
-/**
- * Clean abstraction for container execution.
- * Step 1 uses [DiagnosticStubRuntime] to verify container integrity, APK splits,
- * read-only flags (Android 14+), and ABIs before attaching the virtualization engine in Step 2.
- */
 interface ContainerRuntime {
     fun inspect(app: ContainerApp): ApkInspectionReport
 }
 
-class DiagnosticStubRuntime(private val storage: ContainerStorage) : ContainerRuntime {
+class ShimContainerRuntime(
+    private val storage: ContainerStorage,
+    private val installer: CloneInstaller
+) : ContainerRuntime {
     override fun inspect(app: ContainerApp): ApkInspectionReport {
         val apkDir = storage.appApkDir(app.packageName)
         val dataDir = storage.ensureAppDataSkeleton(app.packageName)
 
-        val apkFiles = apkDir.listFiles { f -> f.isFile && f.name.endsWith(".apk") }.orEmpty()
+        val apkFiles = apkDir.listFiles { f -> f.isFile && f.name.endsWith(".apk") }.orEmpty().toList()
         val allReadOnly = apkFiles.isNotEmpty() && apkFiles.all { !it.canWrite() }
         val dataFilesCount = countFiles(dataDir)
-
-        val notice = "Шаг 1 (Каркас v0.1): APK, сплиты и изолированные папки готовы. " +
-            "Движок запуска гостевого процесса подключается на Шаге 2."
+        val advice = EngineAdvisor.analyze(app.packageName, apkFiles, app.nativeAbis)
+        val clonePkg = app.clonePackageName
+        val isInstalled = clonePkg != null && installer.isPackageInstalled(clonePkg)
 
         val report = ApkInspectionReport(
             packageName = app.packageName,
@@ -34,14 +34,18 @@ class DiagnosticStubRuntime(private val storage: ContainerStorage) : ContainerRu
             readOnlyEnforced = allReadOnly,
             dataDirectoryPath = dataDir.absolutePath,
             dataFilesCount = dataFilesCount,
-            runtimeNotice = notice
+            recommendedEngine = advice.recommendedMode,
+            selectedEngine = app.selectedEngine,
+            engineReason = app.engineReason.ifBlank { advice.reason },
+            clonePackageName = clonePkg,
+            isCloneInstalled = isInstalled
         )
 
         AppLogger.i(
             "ContainerRuntime",
             "Инспекция ${app.packageName}: apk=${report.apkFilesCount}, " +
-                "readOnly=$allReadOnly, ABIs=${report.nativeAbis.ifEmpty { listOf("pure-dex") }.joinToString(",")}, " +
-                "dataDir=${dataDir.name}"
+                "режим=${report.selectedEngine.shortTag} (рек: ${report.recommendedEngine.shortTag}), " +
+                "клон=${clonePkg ?: "не собран"} (установлен=$isInstalled)"
         )
         return report
     }

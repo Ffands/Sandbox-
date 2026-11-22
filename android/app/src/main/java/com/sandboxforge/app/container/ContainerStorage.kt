@@ -1,5 +1,6 @@
 package com.sandboxforge.app.container
 
+import com.sandboxforge.app.clone.EngineMode
 import com.sandboxforge.app.logging.AppLogger
 import org.json.JSONArray
 import org.json.JSONObject
@@ -13,6 +14,7 @@ import java.io.File
  *     data/<packageName>/{files,cache,shared_prefs,databases}
  *     sdcard/
  *     meta/apps.json
+ *     meta/icons/<packageName>.png
  */
 class ContainerStorage(baseFilesDir: File, val containerId: String = "default") {
     val rootDir: File = File(File(baseFilesDir, "containers"), containerId)
@@ -20,6 +22,7 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
     val dataDir: File = File(rootDir, "data")
     val sdcardDir: File = File(rootDir, "sdcard")
     val metaDir: File = File(rootDir, "meta")
+    val iconsDir: File = File(metaDir, "icons")
     private val manifestFile: File = File(metaDir, "apps.json")
 
     init {
@@ -27,7 +30,7 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
     }
 
     fun ensureLayout() {
-        listOf(rootDir, apksDir, dataDir, sdcardDir, metaDir).forEach { dir ->
+        listOf(rootDir, apksDir, dataDir, sdcardDir, metaDir, iconsDir).forEach { dir ->
             if (!dir.exists()) {
                 dir.mkdirs()
             }
@@ -63,6 +66,12 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
                     val source = runCatching {
                         InstallSource.valueOf(obj.optString("source", InstallSource.INSTALLED_FROM_APK.name))
                     }.getOrDefault(InstallSource.INSTALLED_FROM_APK)
+                    val recommendedEngine = runCatching {
+                        EngineMode.valueOf(obj.optString("recommendedEngine", EngineMode.MOD_SHIM.name))
+                    }.getOrDefault(EngineMode.MOD_SHIM)
+                    val selectedEngine = runCatching {
+                        EngineMode.valueOf(obj.optString("selectedEngine", recommendedEngine.name))
+                    }.getOrDefault(recommendedEngine)
 
                     add(
                         ContainerApp(
@@ -74,7 +83,12 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
                             apkFileNames = apkList,
                             totalApkBytes = obj.optLong("totalApkBytes", 0L),
                             nativeAbis = abiList,
-                            installedAtMillis = obj.optLong("installedAtMillis", 0L)
+                            installedAtMillis = obj.optLong("installedAtMillis", 0L),
+                            recommendedEngine = recommendedEngine,
+                            selectedEngine = selectedEngine,
+                            engineReason = obj.optString("engineReason", ""),
+                            clonePackageName = obj.optString("clonePackageName", "").ifBlank { null },
+                            launcherActivity = obj.optString("launcherActivity", "").ifBlank { null }
                         )
                     )
                 }
@@ -87,6 +101,22 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
     fun upsertApp(app: ContainerApp) {
         val existing = loadApps().filterNot { it.packageName == app.packageName }
         saveApps(listOf(app) + existing)
+    }
+
+    fun updateApp(packageName: String, transform: (ContainerApp) -> ContainerApp): ContainerApp? {
+        val current = loadApps()
+        var updatedItem: ContainerApp? = null
+        val next = current.map { item ->
+            if (item.packageName == packageName) {
+                transform(item).also { updatedItem = it }
+            } else {
+                item
+            }
+        }
+        if (updatedItem != null) {
+            saveApps(next)
+        }
+        return updatedItem
     }
 
     fun removeApp(packageName: String): Boolean {
@@ -124,6 +154,11 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
                 put("totalApkBytes", app.totalApkBytes)
                 put("nativeAbis", JSONArray(app.nativeAbis))
                 put("installedAtMillis", app.installedAtMillis)
+                put("recommendedEngine", app.recommendedEngine.name)
+                put("selectedEngine", app.selectedEngine.name)
+                put("engineReason", app.engineReason)
+                put("clonePackageName", app.clonePackageName.orEmpty())
+                put("launcherActivity", app.launcherActivity.orEmpty())
             }
             array.put(obj)
         }

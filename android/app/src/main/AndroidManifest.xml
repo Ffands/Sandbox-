@@ -2,10 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Required for importing installed apps from the host device into the container -->
+    <!-- Required for importing installed apps and launching installed clones -->
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
+
+    <!-- Required for installing patched clones via PackageInstaller -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".SandboxApp"
@@ -25,6 +28,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Receives live startup telemetry from cloned apps running SandboxShim -->
+        <receiver
+            android:name=".clone.ShimEventReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.sandboxforge.action.SHIM_EVENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Receives PackageInstaller session commit callbacks -->
+        <receiver
+            android:name=".clone.InstallResultReceiver"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

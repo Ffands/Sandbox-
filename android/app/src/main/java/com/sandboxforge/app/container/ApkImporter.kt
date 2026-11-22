@@ -6,19 +6,22 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import com.sandboxforge.app.clone.EngineAdvisor
 import com.sandboxforge.app.logging.AppLogger
+import com.sandboxforge.app.ui.AppIconCache
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.zip.ZipFile
 
 /**
- * Handles importing installed host apps (base.apk + all split_*.apk)
- * and installing external APK files into the isolated container storage.
+ * Handles importing installed host apps (base.apk + all split_*.apk),
+ * installing external APK files, caching app icons, and running EngineAdvisor.
  */
 class ApkImporter(
     private val context: Context,
-    private val storage: ContainerStorage
+    private val storage: ContainerStorage,
+    private val iconCache: AppIconCache
 ) {
     private val pm: PackageManager = context.packageManager
 
@@ -28,6 +31,7 @@ class ApkImporter(
 
         return apps.mapNotNull { appInfo ->
             if (appInfo.packageName == selfPkg) return@mapNotNull null
+            if (appInfo.packageName.startsWith("sf.c1.")) return@mapNotNull null
             val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             if (isSystem && !includeSystem) return@mapNotNull null
 
@@ -57,6 +61,7 @@ class ApkImporter(
         )
 
         val targetDir = storage.prepareCleanApkDir(deviceApp.packageName)
+        val copiedFiles = mutableListOf<File>()
         val copiedNames = mutableListOf<String>()
         var totalBytes = 0L
         val detectedAbis = linkedSetOf<String>()
@@ -69,12 +74,13 @@ class ApkImporter(
         val baseDst = File(targetDir, "base.apk")
         copyFile(baseSrc, baseDst)
         baseDst.setReadOnly()
+        copiedFiles.add(baseDst)
         copiedNames.add(baseDst.name)
         totalBytes += baseDst.length()
         detectedAbis.addAll(inspectNativeAbis(baseDst))
         AppLogger.d("ApkImporter", "Скопирован base.apk (${formatBytes(baseDst.length())})")
 
-        // 2. Copy all split APKs (critical for modern App Bundles!)
+        // 2. Copy all split APKs
         deviceApp.splitApkPaths.forEachIndexed { index, splitPath ->
             val splitSrc = File(splitPath)
             if (splitSrc.exists() && splitSrc.canRead()) {
@@ -82,6 +88,7 @@ class ApkImporter(
                 val splitDst = File(targetDir, safeName)
                 copyFile(splitSrc, splitDst)
                 splitDst.setReadOnly()
+                copiedFiles.add(splitDst)
                 copiedNames.add(splitDst.name)
                 totalBytes += splitDst.length()
                 detectedAbis.addAll(inspectNativeAbis(splitDst))
@@ -92,7 +99,9 @@ class ApkImporter(
         }
 
         storage.ensureAppDataSkeleton(deviceApp.packageName)
+        iconCache.saveIconFromInstalledPackage(deviceApp.packageName)
 
+        val advice = EngineAdvisor.analyze(deviceApp.packageName, copiedFiles, detectedAbis.toList())
         val containerApp = ContainerApp(
             packageName = deviceApp.packageName,
             appName = deviceApp.appName,
@@ -102,14 +111,17 @@ class ApkImporter(
             apkFileNames = copiedNames,
             totalApkBytes = totalBytes,
             nativeAbis = detectedAbis.toList(),
-            installedAtMillis = System.currentTimeMillis()
+            installedAtMillis = System.currentTimeMillis(),
+            recommendedEngine = advice.recommendedMode,
+            selectedEngine = advice.recommendedMode,
+            engineReason = advice.reason
         )
         storage.upsertApp(containerApp)
 
         AppLogger.i(
             "ApkImporter",
             "Импорт завершён: ${containerApp.packageName} | файлов: ${copiedNames.size} | " +
-                "размер: ${formatBytes(totalBytes)} | ABIs: ${detectedAbis.ifEmpty { setOf("pure-dex") }.joinToString(",")}"
+                "размер: ${formatBytes(totalBytes)} | движок: ${advice.recommendedMode.shortTag}"
         )
         containerApp
     }.onFailure { err ->
@@ -151,7 +163,9 @@ class ApkImporter(
 
             val abis = inspectNativeAbis(baseDst)
             storage.ensureAppDataSkeleton(pkgName)
+            iconCache.saveIconFromApkFile(pkgName, baseDst)
 
+            val advice = EngineAdvisor.analyze(pkgName, listOf(baseDst), abis)
             val containerApp = ContainerApp(
                 packageName = pkgName,
                 appName = appLabel,
@@ -161,7 +175,10 @@ class ApkImporter(
                 apkFileNames = listOf(baseDst.name),
                 totalApkBytes = baseDst.length(),
                 nativeAbis = abis,
-                installedAtMillis = System.currentTimeMillis()
+                installedAtMillis = System.currentTimeMillis(),
+                recommendedEngine = advice.recommendedMode,
+                selectedEngine = advice.recommendedMode,
+                engineReason = advice.reason
             )
             storage.upsertApp(containerApp)
 
@@ -169,7 +186,7 @@ class ApkImporter(
                 "ApkImporter",
                 "APK установлен в контейнер: $appLabel ($pkgName) | " +
                     "v${containerApp.versionName} | ${formatBytes(baseDst.length())} | " +
-                    "ABIs: ${abis.ifEmpty { listOf("pure-dex") }.joinToString(",")}"
+                    "движок: ${advice.recommendedMode.shortTag}"
             )
             containerApp
         } finally {
@@ -177,6 +194,19 @@ class ApkImporter(
         }
     }.onFailure { err ->
         AppLogger.e("ApkImporter", "Ошибка установки APK из $uri", err)
+    }
+
+    fun backfillMissingIcons(apps: List<ContainerApp>) {
+        apps.forEach { app ->
+            if (!iconCache.iconFileFor(app.packageName).exists()) {
+                val baseApk = File(storage.appApkDir(app.packageName), "base.apk")
+                if (baseApk.exists()) {
+                    iconCache.saveIconFromApkFile(app.packageName, baseApk)
+                } else {
+                    iconCache.saveIconFromInstalledPackage(app.packageName)
+                }
+            }
+        }
     }
 
     private fun inspectNativeAbis(apkFile: File): List<String> {

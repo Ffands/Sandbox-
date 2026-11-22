@@ -1,5 +1,7 @@
 package com.sandboxforge.app.container
 
+import com.sandboxforge.app.clone.EngineMode
+
 enum class InstallSource(val displayName: String) {
     IMPORTED_FROM_DEVICE("Импорт с телефона"),
     INSTALLED_FROM_APK("Установлен из APK")
@@ -14,7 +16,12 @@ data class ContainerApp(
     val apkFileNames: List<String>,
     val totalApkBytes: Long,
     val nativeAbis: List<String>,
-    val installedAtMillis: Long
+    val installedAtMillis: Long,
+    val recommendedEngine: EngineMode = EngineMode.MOD_SHIM,
+    val selectedEngine: EngineMode = EngineMode.MOD_SHIM,
+    val engineReason: String = "",
+    val clonePackageName: String? = null,
+    val launcherActivity: String? = null
 ) {
     val splitCount: Int
         get() = (apkFileNames.size - 1).coerceAtLeast(0)
@@ -43,5 +50,9 @@ data class ApkInspectionReport(
     val readOnlyEnforced: Boolean,
     val dataDirectoryPath: String,
     val dataFilesCount: Int,
-    val runtimeNotice: String
+    val recommendedEngine: EngineMode,
+    val selectedEngine: EngineMode,
+    val engineReason: String,
+    val clonePackageName: String?,
+    val isCloneInstalled: Boolean
 )

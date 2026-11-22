@@ -1,10 +1,19 @@
 package com.sandboxforge.app.ui
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.sandboxforge.app.clone.ApkCloneBuilder
+import com.sandboxforge.app.clone.BuiltCloneBundle
+import com.sandboxforge.app.clone.CloneInstallBus
+import com.sandboxforge.app.clone.CloneInstaller
+import com.sandboxforge.app.clone.EngineMode
+import com.sandboxforge.app.clone.InstallEvent
+import com.sandboxforge.app.clone.LocalKeystoreManager
 import com.sandboxforge.app.container.ApkImporter
 import com.sandboxforge.app.container.ApkInspectionReport
 import com.sandboxforge.app.container.ContainerApp
@@ -13,11 +22,14 @@ import com.sandboxforge.app.container.ContainerFileManager
 import com.sandboxforge.app.container.ContainerRuntime
 import com.sandboxforge.app.container.ContainerStorage
 import com.sandboxforge.app.container.DeviceAppInfo
-import com.sandboxforge.app.container.DiagnosticStubRuntime
+import com.sandboxforge.app.container.ShimContainerRuntime
 import com.sandboxforge.app.logging.AppLogger
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -30,8 +42,15 @@ data class FilePreviewState(
     val truncated: Boolean
 )
 
+sealed class UiActionEffect {
+    data class LaunchInstallConfirmation(val intent: Intent) : UiActionEffect()
+    data object RequestUnknownSourcesPermission : UiActionEffect()
+}
+
 data class SandboxUiState(
     val containerApps: List<ContainerApp> = emptyList(),
+    val installedClones: Set<String> = emptySet(),
+    val hideCloneFromLauncher: Boolean = true,
     val deviceApps: List<DeviceAppInfo> = emptyList(),
     val isLoadingDeviceApps: Boolean = false,
     val isBusy: Boolean = false,
@@ -47,23 +66,108 @@ data class SandboxUiState(
 
 class SandboxViewModel(application: Application) : AndroidViewModel(application) {
     private val storage = ContainerStorage(application.filesDir, containerId = "default")
-    private val importer = ApkImporter(application.applicationContext, storage)
+    private val iconCache = AppIconCache(application.applicationContext, storage.iconsDir)
+    private val importer = ApkImporter(application.applicationContext, storage, iconCache)
     private val fileManager = ContainerFileManager(storage.rootDir)
-    private val runtime: ContainerRuntime = DiagnosticStubRuntime(storage)
+    private val keystoreManager = LocalKeystoreManager(application.filesDir)
+    private val cloneBuilder = ApkCloneBuilder(application.applicationContext, storage, keystoreManager)
+    private val cloneInstaller = CloneInstaller(application.applicationContext)
+    private val runtime: ContainerRuntime = ShimContainerRuntime(storage, cloneInstaller)
 
     private val _uiState = MutableStateFlow(SandboxUiState())
     val uiState: StateFlow<SandboxUiState> = _uiState.asStateFlow()
 
+    private val _effects = MutableSharedFlow<UiActionEffect>(extraBufferCapacity = 8)
+    val effects: SharedFlow<UiActionEffect> = _effects.asSharedFlow()
+
+    private var lastBuiltBundle: BuiltCloneBundle? = null
+
     init {
-        refreshContainerApps()
+        refreshContainerApps(backfillIcons = true)
         navigateToDirectory(fileManager.getRoot())
+        observeInstallEvents()
         AppLogger.i("SandboxVM", "Контейнер default готов: ${storage.rootDir.absolutePath}")
     }
 
-    fun refreshContainerApps() {
+    private fun observeInstallEvents() {
+        viewModelScope.launch {
+            CloneInstallBus.events.collect { event ->
+                when (event) {
+                    is InstallEvent.UserConfirmationRequired -> {
+                        _effects.tryEmit(UiActionEffect.LaunchInstallConfirmation(event.confirmIntent))
+                    }
+
+                    is InstallEvent.Success -> {
+                        val bundle = lastBuiltBundle
+                        if (event.originalPackage.isNotBlank()) {
+                            storage.updateApp(event.originalPackage) { app ->
+                                app.copy(
+                                    clonePackageName = event.clonePackage,
+                                    launcherActivity = bundle?.launcherActivity ?: app.launcherActivity
+                                )
+                            }
+                        }
+                        refreshContainerApps()
+                        _uiState.update {
+                            it.copy(
+                                isBusy = false,
+                                busyMessage = null,
+                                statusBanner = "Клон установлен: ${event.clonePackage}"
+                            )
+                        }
+                    }
+
+                    is InstallEvent.Failure -> {
+                        _uiState.update {
+                            it.copy(
+                                isBusy = false,
+                                busyMessage = null,
+                                statusBanner = "Ошибка установки: ${event.message}"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun getContainerIcon(packageName: String): ImageBitmap? = iconCache.loadCachedIcon(packageName)
+
+    fun getHostIcon(packageName: String): ImageBitmap? = iconCache.loadHostAppIcon(packageName)
+
+    fun setHideCloneFromLauncher(hide: Boolean) {
+        _uiState.update { it.copy(hideCloneFromLauncher = hide) }
+        AppLogger.d("SandboxVM", "Опция скрытия иконки клона из лаунчера: $hide")
+    }
+
+    fun setSelectedEngine(packageName: String, mode: EngineMode) {
+        viewModelScope.launch(Dispatchers.IO) {
+            storage.updateApp(packageName) { it.copy(selectedEngine = mode) }
+            AppLogger.i("EngineAdvisor", "Ручной выбор движка для $packageName -> ${mode.displayName}")
+            refreshContainerApps()
+        }
+    }
+
+    fun refreshContainerApps(backfillIcons: Boolean = false) {
         viewModelScope.launch(Dispatchers.IO) {
             val apps = storage.loadApps()
-            _uiState.update { it.copy(containerApps = apps) }
+            if (backfillIcons && apps.isNotEmpty()) {
+                importer.backfillMissingIcons(apps)
+            }
+            val installedSet = apps.mapNotNull { app ->
+                val clonePkg = app.clonePackageName
+                if (clonePkg != null && cloneInstaller.isPackageInstalled(clonePkg)) {
+                    app.packageName
+                } else {
+                    null
+                }
+            }.toSet()
+            _uiState.update {
+                it.copy(
+                    containerApps = apps,
+                    installedClones = installedSet
+                )
+            }
         }
     }
 
@@ -90,7 +194,6 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isBusy = true, busyMessage = "Импорт ${app.appName}...") }
             val result = importer.importFromDevice(app)
-            val updatedApps = storage.loadApps()
             val message = result.fold(
                 onSuccess = { "Импортировано: ${it.appName} (${it.apkFileNames.size} APK)" },
                 onFailure = { "Ошибка импорта: ${it.message}" }
@@ -99,10 +202,10 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     isBusy = false,
                     busyMessage = null,
-                    containerApps = updatedApps,
                     statusBanner = message
                 )
             }
+            refreshContainerApps()
             refreshCurrentDirectory()
         }
     }
@@ -111,7 +214,6 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(isBusy = true, busyMessage = "Установка APK в контейнер...") }
             val result = importer.installFromApkUri(uri)
-            val updatedApps = storage.loadApps()
             val message = result.fold(
                 onSuccess = { "Установлен APK: ${it.appName} (${it.packageName})" },
                 onFailure = { "Ошибка установки APK: ${it.message}" }
@@ -120,24 +222,100 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     isBusy = false,
                     busyMessage = null,
-                    containerApps = updatedApps,
                     statusBanner = message
                 )
             }
+            refreshContainerApps()
             refreshCurrentDirectory()
+        }
+    }
+
+    fun buildAndInstallOrLaunchClone(app: ContainerApp, forceRebuild: Boolean = false) {
+        if (app.selectedEngine == EngineMode.CLEAN_PROFILE) {
+            AppLogger.w(
+                "EngineAdvisor",
+                "Для ${app.packageName} выбран «Чистый профиль (Банки)» — этот движок (Shizuku/Work Profile) подключается на следующем шаге. Переключи вручную на SHIM для теста патчера."
+            )
+            _uiState.update {
+                it.copy(
+                    statusBanner = "Чистый профиль (Shizuku) подключим на Шаге 2.2. Можно переключить на SHIM вручную."
+                )
+            }
+            return
+        }
+
+        val clonePkg = app.clonePackageName
+        if (!forceRebuild && clonePkg != null && cloneInstaller.isPackageInstalled(clonePkg)) {
+            val launchRes = cloneInstaller.launchClone(clonePkg, app.launcherActivity)
+            if (launchRes.isFailure) {
+                _uiState.update {
+                    it.copy(statusBanner = "Ошибка запуска клона: ${launchRes.exceptionOrNull()?.message}")
+                }
+            }
+            return
+        }
+
+        if (!cloneInstaller.canRequestPackageInstalls()) {
+            AppLogger.w("CloneInstaller", "Нет разрешения REQUEST_INSTALL_PACKAGES — открываю настройки")
+            _effects.tryEmit(UiActionEffect.RequestUnknownSourcesPermission)
+            _uiState.update {
+                it.copy(statusBanner = "Разреши установку из SandboxForge и нажми «Клон» ещё раз")
+            }
+            return
+        }
+
+        val hideIcon = _uiState.value.hideCloneFromLauncher
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isBusy = true, busyMessage = "Сборка клона ${app.appName}...") }
+            val buildResult = cloneBuilder.buildClone(
+                app = app,
+                hideFromLauncher = hideIcon,
+                onProgress = { step ->
+                    _uiState.update { it.copy(busyMessage = step) }
+                }
+            )
+            buildResult.fold(
+                onSuccess = { bundle ->
+                    lastBuiltBundle = bundle
+                    storage.updateApp(app.packageName) {
+                        it.copy(
+                            clonePackageName = bundle.clonePackage,
+                            launcherActivity = bundle.launcherActivity
+                        )
+                    }
+                    _uiState.update { it.copy(busyMessage = "Передача клона в PackageInstaller...") }
+                    val commitRes = cloneInstaller.commitInstallSession(bundle)
+                    if (commitRes.isFailure) {
+                        _uiState.update {
+                            it.copy(
+                                isBusy = false,
+                                busyMessage = null,
+                                statusBanner = "Сбой установщика: ${commitRes.exceptionOrNull()?.message}"
+                            )
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isBusy = false,
+                            busyMessage = null,
+                            statusBanner = "Ошибка сборки клона: ${err.message}"
+                        )
+                    }
+                }
+            )
         }
     }
 
     fun removeContainerApp(packageName: String) {
         viewModelScope.launch(Dispatchers.IO) {
             storage.removeApp(packageName)
-            val updatedApps = storage.loadApps()
+            iconCache.deleteIcon(packageName)
             _uiState.update {
-                it.copy(
-                    containerApps = updatedApps,
-                    statusBanner = "Удалено из контейнера: $packageName"
-                )
+                it.copy(statusBanner = "Удалено из контейнера: $packageName")
             }
+            refreshContainerApps()
             refreshCurrentDirectory()
         }
     }

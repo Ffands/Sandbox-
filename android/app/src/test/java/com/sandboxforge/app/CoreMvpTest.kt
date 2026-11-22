@@ -1,5 +1,10 @@
 package com.sandboxforge.app
 
+import com.sandboxforge.app.clone.ApkManifestPatcher
+import com.sandboxforge.app.clone.ApkZipAligner
+import com.sandboxforge.app.clone.EngineAdvisor
+import com.sandboxforge.app.clone.EngineMode
+import com.sandboxforge.app.clone.LocalKeystoreManager
 import com.sandboxforge.app.container.ContainerApp
 import com.sandboxforge.app.container.ContainerFileManager
 import com.sandboxforge.app.container.ContainerStorage
@@ -13,6 +18,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class CoreMvpTest {
     @get:Rule
@@ -66,14 +75,92 @@ class CoreMvpTest {
             apkFileNames = listOf("base.apk", "split_config.arm64_v8a.apk"),
             totalApkBytes = 1024L,
             nativeAbis = listOf("arm64-v8a"),
-            installedAtMillis = 1700000000000L
+            installedAtMillis = 1700000000000L,
+            recommendedEngine = EngineMode.MOD_SHIM,
+            selectedEngine = EngineMode.CLEAN_PROFILE,
+            clonePackageName = "sf.c1.com.example.demo"
         )
         storage.upsertApp(sample)
         val loaded = storage.loadApps()
         assertEquals(1, loaded.size)
         assertEquals(1, loaded.first().splitCount)
+        assertEquals(EngineMode.CLEAN_PROFILE, loaded.first().selectedEngine)
+        assertEquals("sf.c1.com.example.demo", loaded.first().clonePackageName)
 
         storage.removeApp("com.example.demo")
         assertTrue(storage.loadApps().isEmpty())
+    }
+
+    @Test
+    fun engineAdvisorDetectsBankingVsStandardApps() {
+        val bankAdvice = EngineAdvisor.analyze("ru.sberbankmobile", emptyList(), listOf("arm64-v8a"))
+        assertEquals(EngineMode.CLEAN_PROFILE, bankAdvice.recommendedMode)
+
+        val gameAdvice = EngineAdvisor.analyze("com.example.arcade", emptyList(), listOf("arm64-v8a"))
+        assertEquals(EngineMode.MOD_SHIM, gameAdvice.recommendedMode)
+        assertEquals("sf.c1.com.example.arcade", ApkManifestPatcher.buildClonePackageName("com.example.arcade"))
+    }
+
+    @Test
+    fun zipAlignerAlignsResourcesTo4BytesAndNativeLibsTo16KB() {
+        val srcZip = tempFolder.newFile("input.apk")
+        val outZip = tempFolder.newFile("aligned.apk")
+
+        ZipOutputStream(FileOutputStream(srcZip)).use { zos ->
+            // Compressed entry + old signature to be stripped
+            zos.putNextEntry(ZipEntry("META-INF/CERT.RSA"))
+            zos.write("old-sig".toByteArray())
+            zos.closeEntry()
+
+            // STORED resources.arsc
+            val arscData = ByteArray(123) { 0x42 }
+            val arscEntry = ZipEntry("resources.arsc").apply {
+                method = ZipEntry.STORED
+                size = arscData.size.toLong()
+                compressedSize = arscData.size.toLong()
+                crc = CRC32().apply { update(arscData) }.value
+            }
+            zos.putNextEntry(arscEntry)
+            zos.write(arscData)
+            zos.closeEntry()
+
+            // STORED native .so library
+            val soData = ByteArray(256) { 0x7F }
+            val soEntry = ZipEntry("lib/arm64-v8a/libdemo.so").apply {
+                method = ZipEntry.STORED
+                size = soData.size.toLong()
+                compressedSize = soData.size.toLong()
+                crc = CRC32().apply { update(soData) }.value
+            }
+            zos.putNextEntry(soEntry)
+            zos.write(soData)
+            zos.closeEntry()
+        }
+
+        ApkZipAligner.repackAndAlign(
+            sourceApk = srcZip,
+            outputApk = outZip,
+            additions = mapOf("assets/sandbox_config.json" to "{}".toByteArray())
+        )
+
+        val offsets = ApkZipAligner.inspectStoredDataOffsets(outZip)
+        val arscOffset = offsets["resources.arsc"]
+        val soOffset = offsets["lib/arm64-v8a/libdemo.so"]
+        assertNotNull(arscOffset)
+        assertNotNull(soOffset)
+        assertEquals("resources.arsc must be 4-byte aligned", 0L, arscOffset!! % 4L)
+        assertEquals("uncompressed .so must be 16KB aligned for Android 15-17", 0L, soOffset!! % 16384L)
+    }
+
+    @Test
+    fun localKeystoreManagerGeneratesAndReloadsSignerConfig() {
+        val baseDir = tempFolder.newFolder("ks_base")
+        val mgr = LocalKeystoreManager(baseDir)
+
+        val first = mgr.getSignerConfig()
+        val second = mgr.getSignerConfig()
+        assertNotNull(first)
+        assertNotNull(second)
+        assertTrue(File(File(baseDir, "keys"), "sandboxforge_clone.p12").exists())
     }
 }

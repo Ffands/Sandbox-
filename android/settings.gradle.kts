@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "SandboxForge"
 include(":app")
+include(":shim")

@@ -3,6 +3,8 @@ package com.sandboxforge.app.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,11 +19,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FileOpen
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
@@ -30,6 +35,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,16 +46,22 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sandboxforge.app.clone.ActiveShimTelemetry
+import com.sandboxforge.app.clone.EngineMode
+import com.sandboxforge.app.clone.ShimTelemetryStore
 import com.sandboxforge.app.container.ApkInspectionReport
 import com.sandboxforge.app.container.ContainerApp
 import com.sandboxforge.app.container.DeviceAppInfo
@@ -65,14 +77,20 @@ import com.sandboxforge.app.ui.theme.TextMuted
 @Composable
 fun ContainerScreen(
     uiState: SandboxUiState,
+    loadContainerIcon: (String) -> ImageBitmap?,
+    loadHostIcon: (String) -> ImageBitmap?,
+    onToggleHideLauncher: (Boolean) -> Unit,
+    onSelectEngine: (String, EngineMode) -> Unit,
     onOpenDeviceImport: (Boolean) -> Unit,
     onSelectDeviceApp: (DeviceAppInfo) -> Unit,
     onInstallApkUri: (android.net.Uri) -> Unit,
+    onLaunchOrBuildClone: (ContainerApp) -> Unit,
     onInspectApp: (ContainerApp) -> Unit,
     onDismissReport: () -> Unit,
     onOpenAppFolder: (String) -> Unit,
     onDeleteApp: (String) -> Unit
 ) {
+    val activeShims by ShimTelemetryStore.activeByOriginalPkg.collectAsState()
     var showDevicePicker by remember { mutableStateOf(false) }
     var includeSystemApps by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -112,7 +130,7 @@ fun ContainerScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Контейнер #1 (Чистый MVP)",
+                            text = "Контейнер #1 (Shim v0.2)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -125,12 +143,23 @@ fun ContainerScreen(
                     )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Изолированный каталог APK (base + splits) и папок данных. Все действия пишутся в лог.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted
-                )
-                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Скрывать иконку клона на рабочем столе",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = uiState.hideCloneFromLauncher,
+                        onCheckedChange = onToggleHideLauncher
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxWidth()
@@ -225,8 +254,18 @@ fun ContainerScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(uiState.containerApps, key = { it.packageName }) { app ->
+                    val isInstalled = uiState.installedClones.contains(app.packageName)
+                    val shimInfo = activeShims[app.packageName]
                     ContainerAppCard(
                         app = app,
+                        iconBitmap = remember(app.packageName, uiState.containerApps.size) {
+                            loadContainerIcon(app.packageName)
+                        },
+                        isCloneInstalled = isInstalled,
+                        shimTelemetry = shimInfo,
+                        isBusy = uiState.isBusy,
+                        onSelectEngine = { mode -> onSelectEngine(app.packageName, mode) },
+                        onLaunchOrBuild = { onLaunchOrBuildClone(app) },
                         onInspect = { onInspectApp(app) },
                         onOpenFiles = { onOpenAppFolder(app.packageName) },
                         onDelete = { appPendingDelete = app }
@@ -242,6 +281,7 @@ fun ContainerScreen(
             isLoading = uiState.isLoadingDeviceApps,
             includeSystem = includeSystemApps,
             searchQuery = searchQuery,
+            loadHostIcon = loadHostIcon,
             onSearchChange = { searchQuery = it },
             onToggleSystem = { checked ->
                 includeSystemApps = checked
@@ -293,23 +333,59 @@ fun ContainerScreen(
 }
 
 @Composable
+private fun AppIconBox(iconBitmap: ImageBitmap?, fallbackLetter: String, sizeDp: Int = 44) {
+    val shape = RoundedCornerShape(10.dp)
+    if (iconBitmap != null) {
+        Image(
+            bitmap = iconBitmap,
+            contentDescription = null,
+            modifier = Modifier
+                .size(sizeDp.dp)
+                .clip(shape)
+        )
+    } else {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(sizeDp.dp)
+                .clip(shape)
+                .background(SurfaceDark)
+        ) {
+            Text(
+                text = fallbackLetter.take(1).uppercase(),
+                style = MaterialTheme.typography.titleMedium,
+                color = AccentCyan,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
 private fun ContainerAppCard(
     app: ContainerApp,
+    iconBitmap: ImageBitmap?,
+    isCloneInstalled: Boolean,
+    shimTelemetry: ActiveShimTelemetry?,
+    isBusy: Boolean,
+    onSelectEngine: (EngineMode) -> Unit,
+    onLaunchOrBuild: () -> Unit,
     onInspect: () -> Unit,
     onOpenFiles: () -> Unit,
     onDelete: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-        border = BorderStroke(1.dp, BorderDark),
+        border = BorderStroke(1.dp, if (isCloneInstalled) AccentCyan else BorderDark),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                AppIconBox(iconBitmap = iconBitmap, fallbackLetter = app.appName)
+                Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = app.appName,
@@ -327,6 +403,13 @@ private fun ContainerAppCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                IconButton(onClick = onInspect) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = "Инспекция",
+                        tint = TextMuted
+                    )
+                }
                 IconButton(onClick = onDelete) {
                     Icon(
                         imageVector = Icons.Outlined.Delete,
@@ -336,19 +419,57 @@ private fun ContainerAppCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = "v${app.versionName} • ${formatBytes(app.totalApkBytes)} • " +
                     "APK: ${app.apkFileNames.size}" +
                     (if (app.splitCount > 0) " (сплитов: ${app.splitCount})" else "") +
-                    " • ${app.source.displayName}",
+                    " • ABI: ${app.nativeAbis.ifEmpty { listOf("pure-dex") }.joinToString(",")}",
                 style = MaterialTheme.typography.labelSmall,
                 color = TextMuted
             )
-            if (app.nativeAbis.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(2.dp))
+
+            // Engine auto-advisor + manual override chips
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = app.selectedEngine == EngineMode.MOD_SHIM,
+                    onClick = { onSelectEngine(EngineMode.MOD_SHIM) },
+                    label = {
+                        Text(
+                            text = if (app.recommendedEngine == EngineMode.MOD_SHIM) "SHIM (рек.)" else "SHIM",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                )
+                FilterChip(
+                    selected = app.selectedEngine == EngineMode.CLEAN_PROFILE,
+                    onClick = { onSelectEngine(EngineMode.CLEAN_PROFILE) },
+                    label = {
+                        Text(
+                            text = if (app.recommendedEngine == EngineMode.CLEAN_PROFILE) "Чистый (рек.)" else "Чистый",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                )
+            }
+
+            if (shimTelemetry != null) {
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "ABI: ${app.nativeAbis.joinToString(", ")}",
+                    text = "Shim OK • PID ${shimTelemetry.pid} • " +
+                        if (shimTelemetry.is64Bit) "64-bit" else "32-bit (Tango/ARM32)",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = StatusGreen
+                )
+            } else if (isCloneInstalled && app.clonePackageName != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Клон установлен: ${app.clonePackageName}",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = AccentCyan
@@ -358,16 +479,17 @@ private fun ContainerAppCard(
             Spacer(modifier = Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
-                    onClick = onInspect,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    onClick = onLaunchOrBuild,
+                    enabled = !isBusy,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Outlined.PlayArrow,
+                        imageVector = if (isCloneInstalled) Icons.Outlined.PlayArrow else Icons.Outlined.Build,
                         contentDescription = null,
                         modifier = Modifier.size(16.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Инспектор / Старт")
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (isCloneInstalled) "Запустить клон" else "Собрать клон")
                 }
                 OutlinedButton(
                     onClick = onOpenFiles,
@@ -379,7 +501,7 @@ private fun ContainerAppCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Папка данных")
+                    Text("Файлы")
                 }
             }
         }
@@ -392,6 +514,7 @@ private fun DeviceAppPickerDialog(
     isLoading: Boolean,
     includeSystem: Boolean,
     searchQuery: String,
+    loadHostIcon: (String) -> ImageBitmap?,
     onSearchChange: (String) -> Unit,
     onToggleSystem: (Boolean) -> Unit,
     onSelectApp: (DeviceAppInfo) -> Unit,
@@ -445,37 +568,51 @@ private fun DeviceAppPickerDialog(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(300.dp)
+                            .height(320.dp)
                     ) {
                         items(filtered, key = { it.packageName }) { item ->
+                            val hostIcon = remember(item.packageName) {
+                                loadHostIcon(item.packageName)
+                            }
                             Card(
                                 onClick = { onSelectApp(item) },
                                 colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
                                 border = BorderStroke(1.dp, BorderDark),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    Text(
-                                        text = item.appName,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(10.dp)
+                                ) {
+                                    AppIconBox(
+                                        iconBitmap = hostIcon,
+                                        fallbackLetter = item.appName,
+                                        sizeDp = 36
                                     )
-                                    Text(
-                                        text = item.packageName,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = TextMuted,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (item.splitCount > 0) {
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = "Split APK: base + ${item.splitCount}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = AccentCyan
+                                            text = item.appName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
+                                        Text(
+                                            text = item.packageName,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = TextMuted,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (item.splitCount > 0) {
+                                            Text(
+                                                text = "Split APK: base + ${item.splitCount}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = AccentCyan
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -526,14 +663,23 @@ private fun InspectionReportDialog(
                     color = if (report.readOnlyEnforced) StatusGreen else StatusAmber
                 )
                 Text(
-                    "Файлов в data/: ${report.dataFilesCount}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = report.runtimeNotice,
+                    text = "Рекомендация: ${report.recommendedEngine.displayName}",
                     style = MaterialTheme.typography.bodySmall,
                     color = AccentCyan
+                )
+                Text(
+                    text = report.engineReason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted
+                )
+                Text(
+                    text = if (report.isCloneInstalled) {
+                        "Клон установлен: ${report.clonePackageName}"
+                    } else {
+                        "Клон ещё не установлен"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (report.isCloneInstalled) StatusGreen else StatusAmber
                 )
             }
         },
