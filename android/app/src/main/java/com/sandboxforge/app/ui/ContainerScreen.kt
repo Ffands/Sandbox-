@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -60,6 +61,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sandboxforge.app.clone.ActiveShimTelemetry
+import com.sandboxforge.app.clone.ApkCloneBuilder
 import com.sandboxforge.app.clone.EngineMode
 import com.sandboxforge.app.clone.ShimTelemetryStore
 import com.sandboxforge.app.container.ApkInspectionReport
@@ -85,9 +87,11 @@ fun ContainerScreen(
     onSelectDeviceApp: (DeviceAppInfo) -> Unit,
     onInstallApkUri: (android.net.Uri) -> Unit,
     onLaunchOrBuildClone: (ContainerApp) -> Unit,
+    onRebuildClone: (ContainerApp) -> Unit,
     onInspectApp: (ContainerApp) -> Unit,
     onDismissReport: () -> Unit,
-    onOpenAppFolder: (String) -> Unit,
+    onOpenAppFiles: (ContainerApp) -> Unit,
+    onOpenAppFolderByPackage: (String) -> Unit,
     onDeleteApp: (String) -> Unit
 ) {
     val activeShims by ShimTelemetryStore.activeByOriginalPkg.collectAsState()
@@ -130,7 +134,7 @@ fun ContainerScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Контейнер #1 (Shim v0.2)",
+                            text = "Контейнер #1 (Shim v0.2.2)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -266,8 +270,9 @@ fun ContainerScreen(
                         isBusy = uiState.isBusy,
                         onSelectEngine = { mode -> onSelectEngine(app.packageName, mode) },
                         onLaunchOrBuild = { onLaunchOrBuildClone(app) },
+                        onRebuild = { onRebuildClone(app) },
                         onInspect = { onInspectApp(app) },
-                        onOpenFiles = { onOpenAppFolder(app.packageName) },
+                        onOpenFiles = { onOpenAppFiles(app) },
                         onDelete = { appPendingDelete = app }
                     )
                 }
@@ -300,7 +305,7 @@ fun ContainerScreen(
             report = report,
             onOpenFolder = {
                 onDismissReport()
-                onOpenAppFolder(report.packageName)
+                onOpenAppFolderByPackage(report.packageName)
             },
             onDismiss = onDismissReport
         )
@@ -370,10 +375,13 @@ private fun ContainerAppCard(
     isBusy: Boolean,
     onSelectEngine: (EngineMode) -> Unit,
     onLaunchOrBuild: () -> Unit,
+    onRebuild: () -> Unit,
     onInspect: () -> Unit,
     onOpenFiles: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val needsShimUpdate = isCloneInstalled && app.shimVersion != ApkCloneBuilder.CURRENT_SHIM_VERSION
+
     Card(
         colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
         border = BorderStroke(1.dp, if (isCloneInstalled) AccentCyan else BorderDark),
@@ -402,6 +410,15 @@ private fun ContainerAppCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+                if (isCloneInstalled) {
+                    IconButton(onClick = onRebuild, enabled = !isBusy) {
+                        Icon(
+                            imageVector = Icons.Outlined.Refresh,
+                            contentDescription = "Пересобрать клон",
+                            tint = if (needsShimUpdate) StatusAmber else AccentCyan
+                        )
+                    }
                 }
                 IconButton(onClick = onInspect) {
                     Icon(
@@ -460,19 +477,34 @@ private fun ContainerAppCard(
             if (shimTelemetry != null) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Shim OK • PID ${shimTelemetry.pid} • " +
-                        if (shimTelemetry.is64Bit) "64-bit" else "32-bit (Tango/ARM32)",
+                    text = "Shim v${shimTelemetry.shimVersion.ifBlank { "0.2" }} OK • PID ${shimTelemetry.pid} • " +
+                        (if (shimTelemetry.is64Bit) "64-bit" else "32-bit (Tango/ARM32)") +
+                        if (shimTelemetry.bridgeReady) " • Мост OK" else "",
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                     color = StatusGreen
                 )
+                if (shimTelemetry.shieldStatus.isNotBlank()) {
+                    Text(
+                        text = "Щит: ${shimTelemetry.shieldStatus}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = TextMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             } else if (isCloneInstalled && app.clonePackageName != null) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Клон установлен: ${app.clonePackageName}",
+                    text = if (needsShimUpdate) {
+                        "Клон v${app.shimVersion ?: "0.2.0"} • нажми ↻ для моста файлов и щита"
+                    } else {
+                        "Клон установлен: ${app.clonePackageName}"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
-                    color = AccentCyan
+                    color = if (needsShimUpdate) StatusAmber else AccentCyan
                 )
             }
 
@@ -501,7 +533,7 @@ private fun ContainerAppCard(
                         modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Файлы")
+                    Text(if (isCloneInstalled) "Файлы клона" else "Файлы")
                 }
             }
         }

@@ -15,9 +15,11 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * High-priority ContentProvider injected into cloned APKs.
- * Runs before Application.onCreate() on every Android version (API 26–37),
- * confirms isolated sandbox boot, and sends a live telemetry ping back to SandboxForge.
+ * High-priority ContentProvider injected into cloned APKs (initOrder=MAX_VALUE).
+ * Runs before Application.onCreate() on every Android version (API 26–37):
+ * 1. Installs SandboxShield (original signature + Google Play installer spoofing)
+ * 2. Writes boot marker into clone files/
+ * 3. Sends live SHIM_BOOT telemetry back to SandboxForge
  */
 public class SandboxShimInitProvider extends ContentProvider {
     private static final String TAG = "SandboxShim";
@@ -29,12 +31,14 @@ public class SandboxShimInitProvider extends ContentProvider {
 
         try {
             SandboxConfig cfg = SandboxConfig.loadFromContext(context);
+            String shieldStatus = SandboxShield.install(context, cfg);
+
             String actualPkg = context.getPackageName();
             String dataDir = context.getApplicationInfo().dataDir;
             boolean is64Bit = Process.is64Bit();
             int pid = Process.myPid();
 
-            writeMarker(context, cfg, actualPkg, pid, is64Bit);
+            writeMarker(context, cfg, actualPkg, pid, is64Bit, shieldStatus);
 
             Intent ping = new Intent(SandboxConfig.ACTION_SHIM_EVENT);
             ping.setPackage(cfg.hostPackage);
@@ -47,25 +51,37 @@ public class SandboxShimInitProvider extends ContentProvider {
             ping.putExtra("androidApi", Build.VERSION.SDK_INT);
             ping.putExtra("dataDir", dataDir != null ? dataDir : "");
             ping.putExtra("shimVersion", cfg.shimVersion);
+            ping.putExtra("shieldStatus", shieldStatus);
+            ping.putExtra("bridgeReady", true);
             context.sendBroadcast(ping);
 
-            Log.i(TAG, "Shim booted inside " + actualPkg + " (pid=" + pid + ", 64bit=" + is64Bit + ")");
+            Log.i(TAG, "Shim booted inside " + actualPkg
+                    + " (pid=" + pid + ", 64bit=" + is64Bit + ", shield=" + shieldStatus + ")");
         } catch (Throwable t) {
             Log.e(TAG, "SandboxShimInitProvider boot error", t);
         }
         return true;
     }
 
-    private void writeMarker(Context context, SandboxConfig cfg, String actualPkg, int pid, boolean is64Bit) {
+    private void writeMarker(
+            Context context,
+            SandboxConfig cfg,
+            String actualPkg,
+            int pid,
+            boolean is64Bit,
+            String shieldStatus
+    ) {
         try {
             File marker = new File(context.getFilesDir(), "sandboxforge_shim_boot.txt");
             String text = "host=" + cfg.hostPackage
                     + "\ncontainer=" + cfg.containerId
                     + "\noriginalPackage=" + cfg.originalPackage
                     + "\nclonePackage=" + actualPkg
+                    + "\nshimVersion=" + cfg.shimVersion
                     + "\npid=" + pid
                     + "\nis64Bit=" + is64Bit
                     + "\napi=" + Build.VERSION.SDK_INT
+                    + "\nshield=" + shieldStatus
                     + "\nbootTimeMs=" + System.currentTimeMillis() + "\n";
             try (FileOutputStream fos = new FileOutputStream(marker, false)) {
                 fos.write(text.getBytes(StandardCharsets.UTF_8));

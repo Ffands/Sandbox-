@@ -88,7 +88,9 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
                             selectedEngine = selectedEngine,
                             engineReason = obj.optString("engineReason", ""),
                             clonePackageName = obj.optString("clonePackageName", "").ifBlank { null },
-                            launcherActivity = obj.optString("launcherActivity", "").ifBlank { null }
+                            launcherActivity = obj.optString("launcherActivity", "").ifBlank { null },
+                            bridgeToken = obj.optString("bridgeToken", "").ifBlank { null },
+                            shimVersion = obj.optString("shimVersion", "").ifBlank { null }
                         )
                     )
                 }
@@ -159,6 +161,8 @@ class ContainerStorage(baseFilesDir: File, val containerId: String = "default") 
                 put("engineReason", app.engineReason)
                 put("clonePackageName", app.clonePackageName.orEmpty())
                 put("launcherActivity", app.launcherActivity.orEmpty())
+                put("bridgeToken", app.bridgeToken.orEmpty())
+                put("shimVersion", app.shimVersion.orEmpty())
             }
             array.put(obj)
         }

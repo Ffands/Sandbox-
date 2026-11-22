@@ -14,6 +14,9 @@ data class ActiveShimTelemetry(
     val pid: Int,
     val is64Bit: Boolean,
     val dataDir: String,
+    val shimVersion: String,
+    val shieldStatus: String,
+    val bridgeReady: Boolean,
     val lastBootMillis: Long
 )
 
@@ -41,11 +44,15 @@ class ShimEventReceiver : BroadcastReceiver() {
         val api = intent.getIntExtra("androidApi", 0)
         val dataDir = intent.getStringExtra("dataDir").orEmpty()
         val shimVer = intent.getStringExtra("shimVersion").orEmpty()
+        val shieldStatus = intent.getStringExtra("shieldStatus").orEmpty()
+        val bridgeReady = intent.getBooleanExtra("bridgeReady", false)
 
         val bitness = if (is64) "64-bit" else "32-bit (Tango/ARM32)"
+        val shieldPart = if (shieldStatus.isNotBlank()) " | shield=[$shieldStatus]" else ""
+        val bridgePart = if (bridgeReady) " | bridge=OK" else ""
         AppLogger.i(
             "ShimBridge",
-            "[$event] Клон активен: $clonePkg (оригинал: $origPkg) | PID=$pid | $bitness | API $api | shim v$shimVer | dataDir=$dataDir"
+            "[$event] Клон активен: $clonePkg (оригинал: $origPkg) | PID=$pid | $bitness | API $api | shim v$shimVer$shieldPart$bridgePart | dataDir=$dataDir"
         )
 
         if (origPkg.isNotBlank()) {
@@ -56,6 +63,9 @@ class ShimEventReceiver : BroadcastReceiver() {
                     pid = pid,
                     is64Bit = is64,
                     dataDir = dataDir,
+                    shimVersion = shimVer,
+                    shieldStatus = shieldStatus,
+                    bridgeReady = bridgeReady,
                     lastBootMillis = System.currentTimeMillis()
                 )
             )

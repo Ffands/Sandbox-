@@ -11,24 +11,30 @@ data class BaseManifestPatchResult(
     val originalPackage: String,
     val clonePackage: String,
     val originalAppComponentFactory: String?,
+    val applicationClassName: String?,
     val launcherActivity: String?,
     val rewrittenProvidersCount: Int,
     val rewrittenPermissionsCount: Int,
-    val strippedSharedUserId: String?
+    val strippedSharedUserId: String?,
+    val strippedLaunchPermissions: List<String>,
+    val disabledPairIpComponents: List<String>
 )
 
 /**
  * Patches binary AndroidManifest.xml chunks for both base.apk and split_*.apk using ARSCLib.
  * Critical invariants preserved:
  * 1. Resolves relative class names (.MainActivity, .App) BEFORE renaming package
- * 2. Strips sharedUserId (so cloned OEM/system apps install cleanly without UID mismatch)
+ * 2. Strips sharedUserId & OEM launch/app android:permission locks (fixes com.oplus.permission.safe.SETTINGS)
  * 3. Rewrites provider authorities & custom permissions to prevent INSTALL_FAILED_CONFLICTING_PROVIDER
- * 4. Injects SandboxAppComponentFactory (saving original factory for clean delegation)
- * 5. Injects SandboxShimInitProvider (initOrder=MAX_VALUE) for Android 8–17 startup telemetry
- * 6. Optionally removes CATEGORY_LAUNCHER while keeping exported=true on the launch Activity
+ * 4. Disables com.pairip.licensecheck.* manifest components to prevent immediate Play Store redirects
+ * 5. Adds <queries><package android:name="com.sandboxforge.app"/></queries> for Android 11–17 bridge auth
+ * 6. Injects SandboxAppComponentFactory + SandboxShimInitProvider + SandboxFileBridgeProvider
+ * 7. Optionally removes CATEGORY_LAUNCHER while keeping exported=true on the launch Activity
  */
 object ApkManifestPatcher {
     private const val ATTR_ID_NAME = 0x01010003
+    private const val ATTR_ID_PERMISSION = 0x01010006
+    private const val ATTR_ID_ENABLED = 0x0101000e
     private const val ATTR_ID_EXPORTED = 0x01010010
     private const val ATTR_ID_AUTHORITIES = 0x01010018
     private const val ATTR_ID_INIT_ORDER = 0x0101001a
@@ -38,17 +44,24 @@ object ApkManifestPatcher {
     private const val ATTR_ID_SHARED_USER_LABEL = 0x01010261
 
     private const val SHIM_FACTORY_CLASS = "com.sandboxforge.shim.SandboxAppComponentFactory"
-    private const val SHIM_PROVIDER_CLASS = "com.sandboxforge.shim.SandboxShimInitProvider"
+    private const val SHIM_INIT_PROVIDER_CLASS = "com.sandboxforge.shim.SandboxShimInitProvider"
+    private const val SHIM_FILE_BRIDGE_CLASS = "com.sandboxforge.shim.SandboxFileBridgeProvider"
+
+    const val FILE_BRIDGE_AUTHORITY_SUFFIX = ".sandboxforge.files"
 
     fun buildClonePackageName(originalPackage: String, containerPrefix: String = "sf.c1"): String {
         val cleaned = originalPackage.trim().trim('.')
         return "$containerPrefix.$cleaned"
     }
 
+    fun fileBridgeAuthority(clonePackage: String): String = "$clonePackage$FILE_BRIDGE_AUTHORITY_SUFFIX"
+
     fun patchBaseManifest(
         manifestBytes: ByteArray,
         clonePackage: String,
-        hideFromLauncher: Boolean
+        hideFromLauncher: Boolean,
+        hostPackage: String = "com.sandboxforge.app",
+        neutralizePairIp: Boolean = true
     ): BaseManifestPatchResult {
         val manifest = AndroidManifestBlock()
         manifest.readBytes(ByteArrayInputStream(manifestBytes))
@@ -73,11 +86,20 @@ object ApkManifestPatcher {
 
         // 2. Resolve relative android:name on <application> BEFORE changing package
         resolveRelativeClassAttribute(appEl, ATTR_ID_NAME, originalPackage)
+        val applicationClassName = appEl.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString
 
-        // 3. Walk all components under <application> to resolve relative names, rewrite authorities,
-        //    and locate the MAIN/LAUNCHER entry activity
+        // Strip app-level android:permission if present (otherwise Android applies it to our bridge & launcher)
+        val strippedLaunchPermissions = mutableListOf<String>()
+        appEl.searchAttributeByResourceId(ATTR_ID_PERMISSION)?.let { permAttr ->
+            permAttr.valueAsString?.let { strippedLaunchPermissions.add("application:$it") }
+            appEl.removeAttribute(permAttr)
+        }
+
+        // 3. Walk all components under <application>
         var launcherActivity: String? = null
         var rewrittenProviders = 0
+        val disabledPairIp = mutableListOf<String>()
+        val pairIpDiagnostics = mutableListOf<String>()
         val componentTags = setOf("activity", "activity-alias", "service", "receiver", "provider")
 
         appEl.childElementsList().forEach { child ->
@@ -86,6 +108,16 @@ object ApkManifestPatcher {
                 resolveRelativeClassAttribute(child, ATTR_ID_NAME, originalPackage)
                 if (tag == "activity-alias") {
                     resolveRelativeClassAttribute(child, ATTR_ID_TARGET_ACTIVITY, originalPackage)
+                }
+            }
+
+            val compName = child.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString.orEmpty()
+            if (compName.startsWith("com.pairip.")) {
+                pairIpDiagnostics.add("$tag:$compName")
+                if (neutralizePairIp && compName.startsWith("com.pairip.licensecheck.")) {
+                    child.getOrCreateAndroidAttribute("enabled", ATTR_ID_ENABLED)
+                        .setValueAsBoolean(false)
+                    disabledPairIp.add(compName)
                 }
             }
 
@@ -110,9 +142,13 @@ object ApkManifestPatcher {
             if (tag == "activity" || tag == "activity-alias") {
                 val isLauncher = isLauncherComponent(child)
                 if (isLauncher) {
-                    val compName = child.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString
-                    if (launcherActivity == null && !compName.isNullOrBlank()) {
+                    if (launcherActivity == null && compName.isNotBlank()) {
                         launcherActivity = compName
+                    }
+                    // Strip OEM/custom android:permission from launcher Activity so SandboxForge can launch it
+                    child.searchAttributeByResourceId(ATTR_ID_PERMISSION)?.let { permAttr ->
+                        permAttr.valueAsString?.let { strippedLaunchPermissions.add("$compName:$it") }
+                        child.removeAttribute(permAttr)
                     }
                     // Ensure SandboxForge can launch this activity explicitly even when hidden from launcher
                     child.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
@@ -155,43 +191,74 @@ object ApkManifestPatcher {
             }
         }
 
-        // 5. Capture original appComponentFactory (if any) and inject SandboxAppComponentFactory
+        // 5. Ensure <queries><package android:name="com.sandboxforge.app"/></queries>
+        //    Required on Android 11–17 so SandboxFileBridgeProvider can verify host UID & cert SHA-256
+        ensurePackageQuery(manifestEl, hostPackage)
+
+        // 6. Capture original appComponentFactory (if any) and inject SandboxAppComponentFactory
         val factoryAttr = appEl.searchAttributeByResourceId(ATTR_ID_APP_COMPONENT_FACTORY)
         val originalFactory = factoryAttr?.valueAsString?.let { normalizeClassName(it, originalPackage) }
         appEl.getOrCreateAndroidAttribute("appComponentFactory", ATTR_ID_APP_COMPONENT_FACTORY)
             .setValueAsString(SHIM_FACTORY_CLASS)
 
-        // 6. Inject SandboxShimInitProvider (runs first with full Context on Android 8–17)
-        val shimProvider = appEl.newElement("provider")
-        shimProvider.getOrCreateAndroidAttribute("name", ATTR_ID_NAME)
-            .setValueAsString(SHIM_PROVIDER_CLASS)
-        shimProvider.getOrCreateAndroidAttribute("authorities", ATTR_ID_AUTHORITIES)
+        // 7. Inject SandboxShimInitProvider (runs first with full Context on Android 8–17)
+        val initProvider = appEl.newElement("provider")
+        initProvider.getOrCreateAndroidAttribute("name", ATTR_ID_NAME)
+            .setValueAsString(SHIM_INIT_PROVIDER_CLASS)
+        initProvider.getOrCreateAndroidAttribute("authorities", ATTR_ID_AUTHORITIES)
             .setValueAsString("$clonePackage.sandboxforge.shim")
-        shimProvider.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
+        initProvider.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
             .setValueAsBoolean(false)
-        shimProvider.getOrCreateAndroidAttribute("initOrder", ATTR_ID_INIT_ORDER)
+        initProvider.getOrCreateAndroidAttribute("initOrder", ATTR_ID_INIT_ORDER)
             .setTypeAndData(ValueType.DEC, Int.MAX_VALUE)
 
-        // 7. Finally update root package name
+        // 8. Inject SandboxFileBridgeProvider (exported=true, protected by triple-lock auth inside provider)
+        val bridgeProvider = appEl.newElement("provider")
+        bridgeProvider.getOrCreateAndroidAttribute("name", ATTR_ID_NAME)
+            .setValueAsString(SHIM_FILE_BRIDGE_CLASS)
+        bridgeProvider.getOrCreateAndroidAttribute("authorities", ATTR_ID_AUTHORITIES)
+            .setValueAsString(fileBridgeAuthority(clonePackage))
+        bridgeProvider.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
+            .setValueAsBoolean(true)
+
+        // 9. Finally update root package name
         manifest.packageName = clonePackage
         manifest.refresh()
 
         AppLogger.d(
             "ManifestPatcher",
             "Патч base manifest: $originalPackage -> $clonePackage | " +
-                "launcher=$launcherActivity | providers=$rewrittenProviders | " +
-                "customPerms=${customPermissions.size} | origFactory=${originalFactory ?: "none"}"
+                "app=${applicationClassName ?: "default"} | launcher=$launcherActivity | " +
+                "providers=$rewrittenProviders | customPerms=${customPermissions.size} | " +
+                "origFactory=${originalFactory ?: "none"}"
         )
+        if (strippedLaunchPermissions.isNotEmpty()) {
+            AppLogger.i(
+                "ManifestPatcher",
+                "Сняты ограничивающие android:permission: ${strippedLaunchPermissions.joinToString(", ")}"
+            )
+        }
+        if (pairIpDiagnostics.isNotEmpty() || applicationClassName?.startsWith("com.pairip.") == true) {
+            AppLogger.i(
+                "ManifestPatcher",
+                "Обнаружены PairIP компоненты: app=${applicationClassName ?: "-"} | " +
+                    "items=${pairIpDiagnostics.joinToString(", ").ifEmpty { "none" }} | " +
+                    "отключено licensecheck=${disabledPairIp.size}"
+            )
+        }
 
         return BaseManifestPatchResult(
             patchedBytes = manifest.bytes,
             originalPackage = originalPackage,
             clonePackage = clonePackage,
             originalAppComponentFactory = originalFactory,
+            applicationClassName = applicationClassName,
             launcherActivity = launcherActivity,
             rewrittenProvidersCount = rewrittenProviders,
             rewrittenPermissionsCount = customPermissions.size,
-            strippedSharedUserId = strippedSharedUserId
+            strippedSharedUserId = strippedSharedUserId,
+            strippedLaunchPermissions = strippedLaunchPermissions,
+            disabledPairIpComponents = disabledPairIp
         )
     }
 
@@ -210,6 +277,20 @@ object ApkManifestPatcher {
         }
         manifest.refresh()
         return manifest.bytes
+    }
+
+    private fun ensurePackageQuery(manifestEl: ResXmlElement, targetPackage: String) {
+        val queriesEl = manifestEl.childElementsList().firstOrNull { it.name == "queries" }
+            ?: manifestEl.newElement("queries")
+        val alreadyExists = queriesEl.childElementsList().any { child ->
+            child.name == "package" &&
+                child.searchAttributeByResourceId(ATTR_ID_NAME)?.valueAsString == targetPackage
+        }
+        if (!alreadyExists) {
+            val pkgEl = queriesEl.newElement("package")
+            pkgEl.getOrCreateAndroidAttribute("name", ATTR_ID_NAME)
+                .setValueAsString(targetPackage)
+        }
     }
 
     private fun resolveRelativeClassAttribute(element: ResXmlElement, attrId: Int, originalPackage: String) {

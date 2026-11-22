@@ -21,7 +21,9 @@ data class ContainerApp(
     val selectedEngine: EngineMode = EngineMode.MOD_SHIM,
     val engineReason: String = "",
     val clonePackageName: String? = null,
-    val launcherActivity: String? = null
+    val launcherActivity: String? = null,
+    val bridgeToken: String? = null,
+    val shimVersion: String? = null
 ) {
     val splitCount: Int
         get() = (apkFileNames.size - 1).coerceAtLeast(0)

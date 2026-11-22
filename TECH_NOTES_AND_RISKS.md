@@ -1,18 +1,28 @@
 # TECH_NOTES_AND_RISKS.md
 
-## Архитектурные заметки Шага 1 и 2.1
-- **CI (GitHub Actions):** используется `gradle/actions/setup-gradle@v4` (Gradle 8.10.2) и прямой `sdkmanager` (`platform-tools`, `platforms;android-35`, `build-tools;35.0.0`). Задача `buildShimDex` автоматически собирает `:shim` в `sandbox_shim.dex` через SDK `d8`.
-- **Нулевые конфликты `:shim`:** модуль `:shim` написан на чистой Java без сторонних зависимостей (даже без `androidx`), поэтому `sandbox_shim.dex` не конфликтует с версиями `kotlin-stdlib` / AndroidX внутри клонируемых приложений.
-- **Относительные классы в манифесте:** `ApkManifestPatcher` разворачивает `.MainActivity` / `.MyApp` в полные имена с исходным пакетом **до** переименования `package` в `sf.c1.<pkg>`, иначе клон падал бы с `ClassNotFoundException`.
-- **Split APKs и 16 КБ выравнивание:** при клонировании патчатся и подписываются одним ключом и `base.apk`, и все `split_*.apk`; несжатые `.so` выравниваются на `16384` байт (покрывает и 4 КБ, и 16 КБ Android 15–17).
-- **Скрытие иконки клона:** при активном тумблере удаляется `CATEGORY_LAUNCHER`, но на стартовой Activity принудительно выставляется `exported=true`, чтобы SandboxForge запускал её напрямую по `ComponentName`.
-- **Android 14–17 BAL и PendingIntent:** подтверждение `PackageInstaller` передаётся через `CloneInstallBus` в активную `MainActivity`, а `PendingIntent` использует явный Intent + `FLAG_MUTABLE`.
-- **OnePlus PYB110 (ColorOS, Android 17 / API 37):** 32-битные `armeabi-v7a` клоны запускаются нативно через встроенный системный транслятор Tango, без вендор-привязки в нашем коде (на других устройствах 32-bit работает через нативный ARM32 или свой транслятор ОС).
+## Архитектурные заметки (Шаги 1, 2.1, 2.2)
+- **CI (GitHub Actions):** `gradle/actions/setup-gradle@v4` (Gradle 8.10.2) + прямой `sdkmanager` (`platform-tools`, `platforms;android-35`, `build-tools;35.0.0`). Задача `buildShimDex` собирает pure-Java `:shim` в `sandbox_shim.dex` через `d8 --min-api 26`.
+- **Тройная защита IPC-моста (`SandboxFileBridgeProvider`):**
+  1. `getCallingPackage() == cfg.hostPackage` (`com.sandboxforge.app`).
+  2. `Binder.getCallingUid() == pm.getPackageUid(hostPackage)` + проверка SHA-256 сертификата подписи хоста.
+  3. Constant-time (`MessageDigest.isEqual`) проверка 256-битного `bridgeToken`, уникального для каждого клона.
+  - **Критическая деталь Android 11–17:** `ApkManifestPatcher` автоматически добавляет `<queries><package android:name="com.sandboxforge.app"/></queries>` в манифест клона, иначе приложения с `targetSdk 34/35` не смогли бы проверить UID/сертификат хоста из-за Package Visibility.
+- **Потоковая передача файлов без лимита Binder:** метаданные и превью ходят через `ContentResolver.call()`, а экспорт/импорт файлов любого размера — через `openFile()` (`ParcelFileDescriptor`), минуя 1 МБ лимит Binder-транзакций.
+- **Снятие `android:permission`:** `ApkManifestPatcher` снимает `android:permission` (`0x01010006`) со стартовой Activity/alias и `<application>` клона, чтобы системные/OEM права (например, `com.oplus.permission.safe.SETTINGS`) не блокировали запуск клона и работу `SandboxFileBridgeProvider`.
+- **Щит совместимости (`SandboxShield` + `SandboxAppComponentFactory`):**
+  - Оригинальные сертификаты извлекаются из `base.apk` через `com.android.apksig.ApkVerifier` (поддержка v1/v2/v3/v4) и сохраняются в `assets/sandbox_config.json`.
+  - Манифестные `com.pairip.licensecheck.*` компоненты отключаются (`android:enabled="false"`), а при динамическом создании перехватываются в `SandboxAppComponentFactory` на `SandboxNoOpActivity` / `SandboxNoOpProvider`.
+- **Очистка кэша сборки:** `ApkCloneBuilder.cleanupBuildCache()` автоматически удаляет `cacheDir/clone_build_*` после `InstallEvent.Success`, `Failure`, сбоя сборки и при старте приложения.
 
 ## Слабые места и зоны внимания (на следующие шаги)
-1. **Доступ Файлового менеджера к данным запущенного клона (Шаг 2.2):** сейчас данные клона живут в `/data/user/0/sf.c1.<pkg>/`, а локальная папка контейнера хранит APK и заготовку. На Шаге 2.2 добавим защищённый IPC-мост в `SandboxShim`, чтобы Файловый менеджер SandboxForge напрямую просматривал и переносил сейвы из `/data/user/0/sf.c1.<pkg>/`.
-2. **Подмена оригинальной подписи APK внутри `SandboxShim`:** часть игр и приложений (в т.ч. часть компонентов OZON / VK / Google Login) сверяют свою подпись через `PackageManager.getPackageInfo`. Хук возврата оригинального сертификата добавим в `SandboxShim` после подтверждения базового запуска клона.
-3. **Чистый профиль для банков (Shizuku):** в UI режим `Чистый` уже определяется автодетектором и выбирается вручную, но фактический запуск через Shizuku / Work Profile подключим на Шаге 2.2–2.3.
-4. **Недостающая очистка кеша сборки клонов:** папка `cacheDir/clone_build_*` хранит временные подписанные APK до следующего пересбора — позже стоит автоматически чистить её сразу после `STATUS_SUCCESS`.
-5. **Огромные игры (>500 МБ):** перепаковка и подпись в Java могут занять 15–40 секунд и требуют свободного места ~2x от размера APK.
-6. **Сдвиг времени и TLS / C++ NDK:** перехват `clock_gettime`, сканер памяти и нативный краш-хендлер (`SIGSEGV`/`SIGABRT`) подключатся на этапе добавления C++ NDK слоя в `:shim`.
+1. **Android 17 (API 37) Hidden API ограничения на `IPackageManager`:**
+   - Рефлексия `ActivityThread.sPackageManager` и `ApplicationPackageManager.mPM` внутри `SandboxShield` может быть заблокирована политикой Hidden API на Android 15–17 (особенно у приложений с `targetSdk 35+`).
+   - Код защищён `try/catch` (клон никогда не упадёт из-за хука) и пишет точный статус `pm=OK(...)` или `pm=BLOCKED(...)` в лог `[ShimBridge]`. Если на API 37 рефлексия окажется `BLOCKED`, в следующем шаге добавим легковесный HiddenApiBypass / C++ NDK слой.
+2. **Нативный слой `libpairipcore.so` (C++ проверка целостности APK):**
+   - Отключение `com.pairip.licensecheck` и Java-подмена подписи закрывают Java-проверку лицензии. Если конкретная игра (например, `Idle Slayer`) дополнительно проверяет CRC файла `base.apk` внутри нативного `libpairipcore.so` через системный вызов `openat()`, потребуются либо C++ NDK-редирект (`openat` → оригинальный `base.apk`), либо движок «Чистый профиль» (Шаг 2.3).
+3. **Движок «Чистый профиль» (Шаг 2.3 — банки и жёсткий PairIP):**
+   - Через Shizuku можно создавать/управлять отдельным профилем и ставить оригинальный APK без переподписи (`pm install -i com.android.vending`).
+   - Отдельно изучим вариант **без Shizuku** (встроенный Android Managed/Work Profile через `DevicePolicyManager` — ограничение Android: только 1 Work Profile на устройство, зато 0 внешних утилит и работает на любом телефоне).
+4. **Старые клоны `v0.2.0-shim`:** установленные до `v0.2.2` клоны не содержат `SandboxFileBridgeProvider` — UI корректно перехватывает это и предлагает 1-клик пересборку поверх (данные/сейвы сохраняются, т.к. подпись тем же локальным ключом `sandboxforge_clone.p12`).
+5. **Локальный клиент Play Market (будущий этап):** потребует интеграции с Aurora/Play API (анонимный или пользовательский токен) для прямой загрузки сплит-APK в контейнер.
+6. **Сдвиг времени, ускорение и сканер памяти (Шаг 3+):** потребуют минимального 16 КБ-выровненного C++ NDK модуля `libshim_native.so` (`clock_gettime` / `gettimeofday` / `/proc/self/maps`).

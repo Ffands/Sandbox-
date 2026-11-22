@@ -20,6 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -46,6 +47,8 @@ import com.sandboxforge.app.ui.UiActionEffect
 import com.sandboxforge.app.ui.theme.BgDark
 import com.sandboxforge.app.ui.theme.SandboxForgeTheme
 import com.sandboxforge.app.ui.theme.SurfaceDark
+import com.sandboxforge.app.ui.theme.SurfaceElevated
+import com.sandboxforge.app.ui.theme.TextPrimary
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -120,14 +123,22 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
 
     Scaffold(
         containerColor = BgDark,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
+        snackbarHost = {
+            SnackbarHost(snackbarHostState) { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = SurfaceElevated,
+                    contentColor = TextPrimary
+                )
+            }
+        },
         topBar = {
             TopAppBar(
                 title = {
                     Text(
                         text = when (selectedTab) {
                             0 -> "SandboxForge — Контейнер"
-                            1 -> "Файлы контейнера"
+                            1 -> if (uiState.activeCloneBridge != null) "Живые файлы клона" else "Файлы контейнера"
                             else -> "Логи и краши"
                         },
                         fontWeight = FontWeight.SemiBold
@@ -183,11 +194,16 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
                     onOpenDeviceImport = { includeSystem -> viewModel.loadDeviceApps(includeSystem) },
                     onSelectDeviceApp = { deviceApp -> viewModel.importDeviceApp(deviceApp) },
                     onInstallApkUri = { uri -> viewModel.installExternalApk(uri) },
-                    onLaunchOrBuildClone = { app -> viewModel.buildAndInstallOrLaunchClone(app) },
+                    onLaunchOrBuildClone = { app -> viewModel.buildAndInstallOrLaunchClone(app, forceRebuild = false) },
+                    onRebuildClone = { app -> viewModel.buildAndInstallOrLaunchClone(app, forceRebuild = true) },
                     onInspectApp = { app -> viewModel.inspectContainerApp(app) },
                     onDismissReport = { viewModel.dismissInspectionReport() },
-                    onOpenAppFolder = { pkg ->
-                        viewModel.openAppDataFolder(pkg)
+                    onOpenAppFiles = { app ->
+                        viewModel.openAppFiles(app)
+                        selectedTab = 1
+                    },
+                    onOpenAppFolderByPackage = { pkg ->
+                        viewModel.openAppFilesByPackage(pkg)
                         selectedTab = 1
                     },
                     onDeleteApp = { pkg -> viewModel.removeContainerApp(pkg) }
@@ -195,16 +211,21 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
 
                 1 -> FileManagerScreen(
                     uiState = uiState,
-                    onNavigateInto = { dir -> viewModel.navigateToDirectory(dir) },
+                    onItemClick = { item -> viewModel.onBrowserItemClick(item) },
                     onNavigateUp = { viewModel.navigateUp() },
                     onRefresh = { viewModel.refreshCurrentDirectory() },
                     onCreateFolder = { name -> viewModel.createFolder(name) },
-                    onOpenFilePreview = { file -> viewModel.openFilePreview(file) },
                     onDismissPreview = { viewModel.dismissFilePreview() },
-                    onRequestExportFile = { file -> viewModel.requestExportFile(file) },
+                    onRequestExportItem = { item -> viewModel.requestExportItem(item) },
                     onCompleteExportFile = { uri -> viewModel.completeExportFile(uri) },
                     onImportFileIntoDir = { uri -> viewModel.importFileIntoCurrentDir(uri) },
-                    onDeleteItem = { item -> viewModel.deleteFileItem(item) }
+                    onDeleteItem = { item -> viewModel.deleteBrowserItem(item) },
+                    onSwitchCloneRoot = { rootKey -> viewModel.switchCloneRoot(rootKey) },
+                    onSwitchToLocalContainer = { viewModel.switchToLocalContainer() },
+                    onClearCloneCache = { viewModel.clearActiveCloneCache() },
+                    onRebuildCloneForBridge = { app ->
+                        viewModel.buildAndInstallOrLaunchClone(app, forceRebuild = true)
+                    }
                 )
 
                 else -> LogScreen(

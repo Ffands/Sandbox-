@@ -14,8 +14,9 @@ import android.util.Log;
 
 /**
  * First entry point injected into cloned APKs (Android 9–17 / API 28+).
- * Cleanly delegates all component instantiation to the guest app's original AppComponentFactory
- * (such as androidx.core.app.CoreComponentFactory) so AndroidX and OEM apps never break.
+ * 1. Cleanly delegates component instantiation to the guest app's original AppComponentFactory.
+ * 2. Intercepts PairIP licensecheck components (LicenseActivity / LicenseContentProvider)
+ *    before they can redirect the user to Google Play.
  */
 @TargetApi(Build.VERSION_CODES.P)
 public class SandboxAppComponentFactory extends AppComponentFactory {
@@ -23,6 +24,7 @@ public class SandboxAppComponentFactory extends AppComponentFactory {
 
     private volatile AppComponentFactory originalDelegate;
     private volatile boolean delegateResolved = false;
+    private volatile boolean shieldEnabled = true;
 
     private AppComponentFactory resolveDelegate(ClassLoader cl) {
         if (delegateResolved) {
@@ -34,6 +36,7 @@ public class SandboxAppComponentFactory extends AppComponentFactory {
             }
             try {
                 SandboxConfig cfg = SandboxConfig.loadFromClassLoader(cl);
+                shieldEnabled = cfg.shieldEnabled;
                 String origName = cfg.originalAppComponentFactory;
                 if (origName != null
                         && !origName.isEmpty()
@@ -52,6 +55,11 @@ public class SandboxAppComponentFactory extends AppComponentFactory {
             }
             return originalDelegate;
         }
+    }
+
+    private boolean isBlockedPairIpClass(String className) {
+        if (!shieldEnabled || className == null) return false;
+        return className.startsWith("com.pairip.licensecheck.");
     }
 
     @Override
@@ -80,6 +88,10 @@ public class SandboxAppComponentFactory extends AppComponentFactory {
     public Activity instantiateActivity(ClassLoader cl, String className, Intent intent)
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         AppComponentFactory delegate = resolveDelegate(cl);
+        if (isBlockedPairIpClass(className)) {
+            Log.i(TAG, "Shield intercepted PairIP Activity: " + className);
+            return new SandboxNoOpActivity();
+        }
         if (delegate != null) {
             return delegate.instantiateActivity(cl, className, intent);
         }
@@ -110,6 +122,10 @@ public class SandboxAppComponentFactory extends AppComponentFactory {
     public ContentProvider instantiateProvider(ClassLoader cl, String className)
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
         AppComponentFactory delegate = resolveDelegate(cl);
+        if (isBlockedPairIpClass(className)) {
+            Log.i(TAG, "Shield intercepted PairIP Provider: " + className);
+            return new SandboxNoOpProvider();
+        }
         if (delegate != null) {
             return delegate.instantiateProvider(cl, className);
         }

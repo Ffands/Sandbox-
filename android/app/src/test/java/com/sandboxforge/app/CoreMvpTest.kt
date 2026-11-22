@@ -78,7 +78,9 @@ class CoreMvpTest {
             installedAtMillis = 1700000000000L,
             recommendedEngine = EngineMode.MOD_SHIM,
             selectedEngine = EngineMode.CLEAN_PROFILE,
-            clonePackageName = "sf.c1.com.example.demo"
+            clonePackageName = "sf.c1.com.example.demo",
+            bridgeToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            shimVersion = "0.2.2"
         )
         storage.upsertApp(sample)
         val loaded = storage.loadApps()
@@ -86,6 +88,11 @@ class CoreMvpTest {
         assertEquals(1, loaded.first().splitCount)
         assertEquals(EngineMode.CLEAN_PROFILE, loaded.first().selectedEngine)
         assertEquals("sf.c1.com.example.demo", loaded.first().clonePackageName)
+        assertEquals(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            loaded.first().bridgeToken
+        )
+        assertEquals("0.2.2", loaded.first().shimVersion)
 
         storage.removeApp("com.example.demo")
         assertTrue(storage.loadApps().isEmpty())
@@ -98,7 +105,9 @@ class CoreMvpTest {
 
         val gameAdvice = EngineAdvisor.analyze("com.example.arcade", emptyList(), listOf("arm64-v8a"))
         assertEquals(EngineMode.MOD_SHIM, gameAdvice.recommendedMode)
-        assertEquals("sf.c1.com.example.arcade", ApkManifestPatcher.buildClonePackageName("com.example.arcade"))
+        val clonePkg = ApkManifestPatcher.buildClonePackageName("com.example.arcade")
+        assertEquals("sf.c1.com.example.arcade", clonePkg)
+        assertEquals("sf.c1.com.example.arcade.sandboxforge.files", ApkManifestPatcher.fileBridgeAuthority(clonePkg))
     }
 
     @Test
