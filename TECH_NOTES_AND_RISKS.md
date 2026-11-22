@@ -1,7 +1,7 @@
 # TECH_NOTES_AND_RISKS.md
 
 ## Архитектурные заметки Шага 1
-- **Сборка без `gradle-wrapper.jar`:** workflow GitHub Actions использует `gradle/actions/setup-gradle@v4` с зафиксированной версией Gradle `8.10.2`, поэтому бинарный wrapper-jar в репозитории не требуется.
+- **Сборка без `gradle-wrapper.jar` и `setup-android`:** workflow GitHub Actions использует `gradle/actions/setup-gradle@v4` (Gradle `8.10.2`) и напрямую предустановленный на `ubuntu-latest` `sdkmanager` (явно ставятся `platform-tools`, `platforms;android-35`, `build-tools;35.0.0`, без устаревшего пакета `tools`, на котором падал `android-actions/setup-android@v3` с `cmdline-tools 16.0`).
 - **Split APKs:** импорт с телефона копирует `sourceDir` (`base.apk`) и весь массив `splitSourceDirs` (`split_*.apk`), сразу сохраняя список обнаруженных нативных ABI (`lib/<abi>/*.so`).
 - **Android 14+ read-only DEX/APK:** все скопированные в `apks/<pkg>/` файлы помечаются `setReadOnly()`, а удаление корректно снимает флаг `writable` перед очисткой.
 - **Изоляция файлового менеджера:** `ContainerFileManager` проверяет `canonicalPath` перед каждой операцией — выход за корень контейнера через `..` невозможен.
