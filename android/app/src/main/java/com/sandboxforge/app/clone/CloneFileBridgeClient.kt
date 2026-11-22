@@ -1,7 +1,11 @@
 package com.sandboxforge.app.clone
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.pm.ProviderInfo
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import com.sandboxforge.app.container.formatBytes
 import com.sandboxforge.app.logging.AppLogger
@@ -35,6 +39,11 @@ data class BridgeClearCacheResult(
 )
 
 class BridgeNeedsRebuildException(message: String) : IllegalStateException(message)
+
+class BridgeProcessBlockedException(
+    val isStopped: Boolean,
+    message: String
+) : IllegalStateException(message)
 
 /**
  * Host-side IPC client for SandboxFileBridgeProvider running inside installed cloned apps.
@@ -155,7 +164,10 @@ class CloneFileBridgeClient(private val context: Context) {
     ): Result<Long> = runCatching {
         val uri = buildFileUri(clonePackage, bridgeToken, rootKey, relativePath)
         val input = context.contentResolver.openInputStream(uri)
-            ?: throw BridgeNeedsRebuildException("Не удалось открыть поток чтения из моста клона")
+            ?: throw BridgeProcessBlockedException(
+                isStopped = isPackageStopped(clonePackage),
+                message = "Не удалось открыть поток чтения из моста клона"
+            )
         val copied = input.use { src ->
             src.copyTo(destination, bufferSize = 64 * 1024)
         }
@@ -185,7 +197,10 @@ class CloneFileBridgeClient(private val context: Context) {
         }
         val uri = buildFileUri(clonePackage, bridgeToken, rootKey, targetRel)
         val output = context.contentResolver.openOutputStream(uri, "wt")
-            ?: throw BridgeNeedsRebuildException("Не удалось открыть поток записи в мост клона")
+            ?: throw BridgeProcessBlockedException(
+                isStopped = isPackageStopped(clonePackage),
+                message = "Не удалось открыть поток записи в мост клона"
+            )
         val copied = output.use { dst ->
             source.copyTo(dst, bufferSize = 64 * 1024)
         }
@@ -198,6 +213,20 @@ class CloneFileBridgeClient(private val context: Context) {
 
     private fun callBridge(clonePackage: String, method: String, extras: Bundle): Bundle {
         val authority = ApkManifestPatcher.fileBridgeAuthority(clonePackage)
+        val providerInfo = resolveBridgeProvider(authority)
+        val stopped = isPackageStopped(clonePackage)
+
+        if (providerInfo == null) {
+            val installedProviders = listShimProvidersInPackage(clonePackage)
+            AppLogger.w(
+                "FileBridge",
+                "Провайдер $authority не найден через resolveContentProvider (stopped=$stopped, shimProviders=$installedProviders)"
+            )
+            throw BridgeNeedsRebuildException(
+                "Файловый мост ($authority) отсутствует в манифесте $clonePackage. Нажми «Пересобрать клон»."
+            )
+        }
+
         val uri = Uri.Builder()
             .scheme("content")
             .authority(authority)
@@ -208,21 +237,83 @@ class CloneFileBridgeClient(private val context: Context) {
         } catch (se: SecurityException) {
             throw SecurityException("Мост клона отклонил доступ: ${se.message}", se)
         } catch (iae: IllegalArgumentException) {
-            throw BridgeNeedsRebuildException(
-                "Клон $clonePackage собран старой версией Shim без файлового моста. Нажми «Пересобрать клон»."
+            AppLogger.w(
+                "FileBridge",
+                "Провайдер зарегистрирован (${providerInfo.name}, exported=${providerInfo.exported}, " +
+                    "enabled=${providerInfo.enabled}, stopped=$stopped), но call($method) отклонён системой: ${iae.message}"
             )
+            throw buildBlockedException(clonePackage, stopped, iae.message)
         }
 
         if (reply == null) {
-            throw BridgeNeedsRebuildException(
-                "Файловый мост не найден в клоне $clonePackage. Нажми «Пересобрать клон»."
+            AppLogger.w(
+                "FileBridge",
+                "Провайдер зарегистрирован (${providerInfo.name}, stopped=$stopped), но call($method) вернул null"
             )
+            throw buildBlockedException(clonePackage, stopped, "ContentResolver.call returned null")
         }
         if (!reply.getBoolean("ok", false)) {
             val errMsg = reply.getString("error") ?: "Неизвестная ошибка моста ($method)"
             error(errMsg)
         }
         return reply
+    }
+
+    private fun buildBlockedException(
+        clonePackage: String,
+        stopped: Boolean,
+        detail: String?
+    ): BridgeProcessBlockedException {
+        val msg = if (stopped) {
+            "Клон $clonePackage ещё ни разу не запускался — Android 15–17 / ColorOS блокирует фоновый мост для остановленных приложений. " +
+                "Нажми «Запустить клон» один раз, дождись открытия и вернись в «Файлы»."
+        } else {
+            "Система (ColorOS/Android) не дала поднять процесс $clonePackage в фоне (${detail ?: "blocked"}). " +
+                "Открой клон кнопкой ниже, сверни его и нажми «Обновить»."
+        }
+        return BridgeProcessBlockedException(isStopped = stopped, message = msg)
+    }
+
+    private fun resolveBridgeProvider(authority: String): ProviderInfo? {
+        return runCatching {
+            val pm = context.packageManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.resolveContentProvider(authority, PackageManager.ComponentInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.resolveContentProvider(authority, 0)
+            }
+        }.getOrNull()
+    }
+
+    private fun listShimProvidersInPackage(clonePackage: String): String {
+        return runCatching {
+            val pm = context.packageManager
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(clonePackage, PackageManager.PackageInfoFlags.of(PackageManager.GET_PROVIDERS.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(clonePackage, PackageManager.GET_PROVIDERS)
+            }
+            val list = info.providers
+                ?.filter { it.name.contains("sandboxforge", ignoreCase = true) || (it.authority?.contains("sandboxforge") == true) }
+                ?.map { "${it.name}[auth=${it.authority},exp=${it.exported},en=${it.enabled}]" }
+                .orEmpty()
+            if (list.isEmpty()) "none" else list.joinToString("; ")
+        }.getOrElse { "err:${it.message}" }
+    }
+
+    private fun isPackageStopped(packageName: String): Boolean {
+        return runCatching {
+            val pm = context.packageManager
+            val appInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getApplicationInfo(packageName, PackageManager.ApplicationInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getApplicationInfo(packageName, 0)
+            }
+            (appInfo.flags and ApplicationInfo.FLAG_STOPPED) != 0
+        }.getOrDefault(false)
     }
 
     private fun buildFileUri(

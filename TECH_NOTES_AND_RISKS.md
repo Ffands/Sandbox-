@@ -14,15 +14,15 @@
   - Манифестные `com.pairip.licensecheck.*` компоненты отключаются (`android:enabled="false"`), а при динамическом создании перехватываются в `SandboxAppComponentFactory` на `SandboxNoOpActivity` / `SandboxNoOpProvider`.
 - **Очистка кэша сборки:** `ApkCloneBuilder.cleanupBuildCache()` автоматически удаляет `cacheDir/clone_build_*` после `InstallEvent.Success`, `Failure`, сбоя сборки и при старте приложения.
 
-## Слабые места и зоны внимания (на следующие шаги)
-1. **Android 17 (API 37) Hidden API ограничения на `IPackageManager`:**
-   - Рефлексия `ActivityThread.sPackageManager` и `ApplicationPackageManager.mPM` внутри `SandboxShield` может быть заблокирована политикой Hidden API на Android 15–17 (особенно у приложений с `targetSdk 35+`).
-   - Код защищён `try/catch` (клон никогда не упадёт из-за хука) и пишет точный статус `pm=OK(...)` или `pm=BLOCKED(...)` в лог `[ShimBridge]`. Если на API 37 рефлексия окажется `BLOCKED`, в следующем шаге добавим легковесный HiddenApiBypass / C++ NDK слой.
-2. **Нативный слой `libpairipcore.so` (C++ проверка целостности APK):**
-   - Отключение `com.pairip.licensecheck` и Java-подмена подписи закрывают Java-проверку лицензии. Если конкретная игра (например, `Idle Slayer`) дополнительно проверяет CRC файла `base.apk` внутри нативного `libpairipcore.so` через системный вызов `openat()`, потребуются либо C++ NDK-редирект (`openat` → оригинальный `base.apk`), либо движок «Чистый профиль» (Шаг 2.3).
-3. **Движок «Чистый профиль» (Шаг 2.3 — банки и жёсткий PairIP):**
-   - Через Shizuku можно создавать/управлять отдельным профилем и ставить оригинальный APK без переподписи (`pm install -i com.android.vending`).
-   - Отдельно изучим вариант **без Shizuku** (встроенный Android Managed/Work Profile через `DevicePolicyManager` — ограничение Android: только 1 Work Profile на устройство, зато 0 внешних утилит и работает на любом телефоне).
-4. **Старые клоны `v0.2.0-shim`:** установленные до `v0.2.2` клоны не содержат `SandboxFileBridgeProvider` — UI корректно перехватывает это и предлагает 1-клик пересборку поверх (данные/сейвы сохраняются, т.к. подпись тем же локальным ключом `sandboxforge_clone.p12`).
-5. **Локальный клиент Play Market (будущий этап):** потребует интеграции с Aurora/Play API (анонимный или пользовательский токен) для прямой загрузки сплит-APK в контейнер.
-6. **Сдвиг времени, ускорение и сканер памяти (Шаг 3+):** потребуют минимального 16 КБ-выровненного C++ NDK модуля `libshim_native.so` (`clock_gettime` / `gettimeofday` / `/proc/self/maps`).
+## Слабые места и зоны внимания (подтверждено тестом `v0.2.2` на OnePlus / Android 17)
+1. **Android 15–17 / ColorOS `FLAG_STOPPED` и фоновый `ContentProvider` (исправлено в `v0.2.3`):**
+   - После чистой установки клон находится в состоянии `FLAG_STOPPED`, и система блокирует `ContentResolver.call()` до первого запуска (возвращая `IllegalArgumentException: Unknown URI`).
+   - В `v0.2.3` `CloneFileBridgeClient` проверяет `resolveContentProvider()` + `FLAG_STOPPED` и больше не путает остановленный клон со «старой версией Shim», предлагая 1-клик «Запустить клон» и автообновляя файлы при возврате в SandboxForge.
+2. **Конфликт подписи при обновлении SandboxForge поверх себя (исправлено в `v0.2.3`):**
+   - Раннер GitHub Actions каждый раз генерировал новый `~/.android/debug.keystore`, из-за чего требовалось удалять SandboxForge, терялся `sandboxforge_clone.p12`, и старые клоны (`sf.c1.*`) падали с `INSTALL_FAILED_UPDATE_INCOMPATIBLE` / «Приложение с такой подписью уже установлено».
+   - В `android-build.yml` добавлен `actions/cache@v4` для `~/.android/debug.keystore` + в UI добавлена 1-клик кнопка системного удаления скрытого/конфликтного клона (`ACTION_DELETE`).
+3. **Google PairIP (`com.pairip.application.Application` + `ILicensingService`) в `Idle Slayer`:**
+   - Проверка лицензии выполняется на стороне процесса `com.android.vending` по реальному `Binder.getCallingUid()`, и Play Store возвращает `PendingIntent` на экран «Скачайте игру из Google Play».
+   - Два чистых пути решения на Шаг 2.3: (а) движок «Чистый профиль» через Shizuku / Work Profile (оригинальный нетронутый APK — работает и для PairIP, и для банков); (б) перехват `bindService(ILicensingService)` / DEX-нейтрализация `LicenseClient` внутри `SHIM` (только для игр, если нативный `libpairipcore.so` не рвёт процесс по CRC).
+4. **Android 17 (API 37) Hidden API ограничения на `IPackageManager`:** проверим статус `pm=OK/BLOCKED` в логе сразу после запуска `OZON` на `v0.2.3`.
+5. **Локальный клиент Play Market и C++ NDK (время/скорость/память):** запланированы после закрытия Шага 2.3.

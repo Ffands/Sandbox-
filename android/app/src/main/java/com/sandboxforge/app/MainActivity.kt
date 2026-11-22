@@ -67,6 +67,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshContainerApps()
+        if (viewModel.uiState.value.activeCloneBridge != null) {
+            viewModel.refreshCurrentDirectory()
+        }
     }
 }
 
@@ -107,6 +110,18 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
                         context.startActivity(settingsIntent)
                     }.onFailure { err ->
                         AppLogger.e("MainActivity", "Не удалось открыть настройки установки APK", err)
+                    }
+                }
+
+                is UiActionEffect.RequestUninstallPackage -> {
+                    val uninstallIntent = Intent(
+                        Intent.ACTION_DELETE,
+                        Uri.parse("package:${effect.packageName}")
+                    )
+                    runCatching {
+                        context.startActivity(uninstallIntent)
+                    }.onFailure { err ->
+                        AppLogger.e("MainActivity", "Не удалось открыть диалог удаления ${effect.packageName}", err)
                     }
                 }
             }
@@ -206,7 +221,9 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
                         viewModel.openAppFilesByPackage(pkg)
                         selectedTab = 1
                     },
-                    onDeleteApp = { pkg -> viewModel.removeContainerApp(pkg) }
+                    onDeleteApp = { pkg -> viewModel.removeContainerApp(pkg) },
+                    onUninstallClone = { clonePkg -> viewModel.requestUninstallClone(clonePkg) },
+                    onDismissConflict = { viewModel.dismissConflictDialog() }
                 )
 
                 1 -> FileManagerScreen(
@@ -225,6 +242,9 @@ private fun SandboxRootScreen(viewModel: SandboxViewModel) {
                     onClearCloneCache = { viewModel.clearActiveCloneCache() },
                     onRebuildCloneForBridge = { app ->
                         viewModel.buildAndInstallOrLaunchClone(app, forceRebuild = true)
+                    },
+                    onLaunchCloneForBridge = { app ->
+                        viewModel.launchInstalledClone(app)
                     }
                 )
 

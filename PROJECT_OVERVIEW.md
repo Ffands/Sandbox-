@@ -7,23 +7,16 @@
 - Гибридный запуск («мясо с гарниром»): Мод-контейнер на базе прослойки `SandboxShim` (живые файлы/время/скорость/память/модули) + Чистый профиль (Shizuku / альтернатива без Shizuku) для банков и жёсткого анти-тампера, с автодетектором движка и ручным переключением.
 - Плавающая панель инструментов, сканер памяти (уровень GameGuardian/Cheat Engine) и однофайловые модули расширения с межмодульными вызовами.
 
-## Текущее состояние («велосипед v0.2.2» — Шаг 2.2 выполнен)
-- **Полевой тест `v0.2.0-shim` на OnePlus PYB110 (Android 17 / API 37):** OZON (205 МБ, 3 Split APK) полностью функционален в клоне с живым `SandboxShim`; на `Глубинном тестировании` поймана блокировка `com.oplus.permission.safe.SETTINGS`; на `Idle Slayer` поймана защита Google Play PairIP (`com.pairip.licensecheck`).
-- **Живой защищённый мост файлов (`SandboxFileBridgeProvider` + `CloneFileBridgeClient`):**
-  - При нажатии «Файлы клона» открываются живые папки `/data/user/0/sf.c1.<pkg>/` (`files/`, `shared_prefs/`, `databases/`, `cache/`) и `Android/data/sf.c1.<pkg>/files` без Root.
-  - Тройная защита доступа: `callingPackage == com.sandboxforge.app` + совпадение UID и SHA-256 сертификата хоста + 256-битный `bridgeToken` на каждый клон + `canonicalPath`-тюрьма.
-  - Поддерживается просмотр текста/XML/JSON/бинарный hex-дамп, потоковый экспорт сейвов, импорт/подмена сейвов внутрь клона, создание папок, удаление и очистка `cache/`.
-- **Щит совместимости (`SandboxShield` в `:shim` + `ApkManifestPatcher`):**
-  - Извлечение оригинальной подписи APK через `apksig` (`ApkVerifier`) и подмена `PackageManager` (`signatures`, `SigningInfo`, `getInstallerPackageName` / `getInstallSourceInfo` → `com.android.vending`) с диагностикой статуса в логе.
-  - Отключение манифестных `com.pairip.licensecheck.*` компонентов + перехват их создания в `SandboxAppComponentFactory` (`SandboxNoOpActivity` / `SandboxNoOpProvider`).
-- **Исправления и UX:**
-  - Снятие ограничивающих `android:permission` со стартовой Activity и `<application>` клона (чинит запуск `com.coloros.deeptesting` и защищает IPC-мост).
-  - Автоматическая очистка `cacheDir/clone_build_*` после установки/ошибки/старта.
-  - Кнопка пересборки клона (`↻`) на карточке и 1-клик баннер обновления Shim в Файловом менеджере + тёмный Snackbar.
+## Текущее состояние («велосипед v0.2.3» — Шаг 2.2 + хотфикс моста и CI-подписи)
+- **Полевой тест `v0.2.2` на OnePlus PYB110 (Android 17 / API 37):**
+  - Автоочистка `clone_build_*` (100–206 МБ) и снятие `android:permission` (`com.oplus.permission.safe.SETTINGS`) сработали штатно.
+  - Пойманы и починены 2 причины сбоев: (1) Android 15–17 / ColorOS блокирует фоновый `ContentProvider` для ни разу не запущенных клонов (`FLAG_STOPPED`) — добавлена точная диагностика `resolveContentProvider` + `FLAG_STOPPED` и 1-клик карточка «Запустить клон» с автообновлением файлов при возврате; (2) случайный debug keystore на каждом прогоне GitHub Actions вызывал конфликт обновления `SandboxForge` и потерю `sandboxforge_clone.p12` — добавлено кэширование `~/.android/debug.keystore` в CI + 1-клик кнопка системного удаления скрытого/конфликтного клона.
+  - Диагностика `Idle Slayer` показала: приложение использует `app=com.pairip.application.Application`, который обращается к `ILicensingService` внутри процесса Google Play (где проверяется реальный `callingUid` пакета), поэтому одного отключения `LicenseActivity` и Java-хука `PackageManager` недостаточно.
 
 ## Утверждённые решения
 - Безопасность файлового моста: строгая проверка хоста (`callingPackage` + UID + SHA-256 сертификата + 256-битный токен).
 - Гибридная стратегия: `SandboxShim` + щит совместимости для игр и модов; отдельный «Чистый» движок (Shizuku + проработка варианта без Shizuku) для банков и жёсткого анти-тампера; позже — локальный клиент Play Market внутри контейнера.
 
 ## Следующий маленький шаг
-Проверить `v0.2.2-bridge-shield` на телефоне: пересобрать `OZON`, `Глубинное тестирование` и `Idle Slayer`, проверить живой доступ к файлам/сейвам OZON, запуск `Глубинного тестирования` и поведение щита против PairIP в `Idle Slayer` (с просмотром строки `Щит: pm=...` в логах). Затем — **Шаг 2.3**: движок «Чистый профиль» (Shizuku + исследование варианта без Shizuku).
+1. Проверить `v0.2.3-bridge-fix`: запустить OZON один раз → открыть «Файлы клона» (и проверить `Глубинное тестирование` после удаления старого конфликтующего клона).
+2. Выбрать путь победы над PairIP / банками для **Шага 2.3**: движок «Чистый профиль» (Shizuku / Work Profile) или патч `LicenseClient` внутри `SHIM`.

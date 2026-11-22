@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sandboxforge.app.clone.ApkCloneBuilder
 import com.sandboxforge.app.clone.BridgeNeedsRebuildException
+import com.sandboxforge.app.clone.BridgeProcessBlockedException
 import com.sandboxforge.app.clone.BuiltCloneBundle
 import com.sandboxforge.app.clone.CloneFileBridgeClient
 import com.sandboxforge.app.clone.CloneInstallBus
@@ -76,6 +77,7 @@ sealed class PendingExportTarget(val suggestedName: String) {
 sealed class UiActionEffect {
     data class LaunchInstallConfirmation(val intent: Intent) : UiActionEffect()
     data object RequestUnknownSourcesPermission : UiActionEffect()
+    data class RequestUninstallPackage(val packageName: String) : UiActionEffect()
 }
 
 data class SandboxUiState(
@@ -91,7 +93,9 @@ data class SandboxUiState(
     val currentLocalDir: File? = null,
     val activeCloneBridge: ActiveCloneBridge? = null,
     val bridgeNeedsRebuildApp: ContainerApp? = null,
+    val bridgeNeedsLaunchApp: ContainerApp? = null,
     val bridgeErrorMessage: String? = null,
+    val conflictingClonePackage: String? = null,
     val currentRelativePath: String = "/",
     val fileItems: List<BrowserFileItem> = emptyList(),
     val filePreview: FilePreviewState? = null,
@@ -169,6 +173,9 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     is InstallEvent.Failure -> {
+                        val conflictPkg = event.clonePackage.takeIf {
+                            it.isNotBlank() && cloneInstaller.isPackageInstalled(it)
+                        }
                         viewModelScope.launch(Dispatchers.IO) {
                             cloneBuilder.cleanupBuildCache()
                         }
@@ -176,6 +183,7 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                             it.copy(
                                 isBusy = false,
                                 busyMessage = null,
+                                conflictingClonePackage = conflictPkg,
                                 statusBanner = "Ошибка установки: ${event.message}"
                             )
                         }
@@ -434,11 +442,32 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun dismissConflictDialog() {
+        _uiState.update { it.copy(conflictingClonePackage = null) }
+    }
+
+    fun requestUninstallClone(clonePackage: String) {
+        _uiState.update { it.copy(conflictingClonePackage = null) }
+        AppLogger.i("CloneInstaller", "Запрос системного удаления клона: $clonePackage")
+        _effects.tryEmit(UiActionEffect.RequestUninstallPackage(clonePackage))
+    }
+
+    fun launchInstalledClone(app: ContainerApp) {
+        val clonePkg = app.clonePackageName ?: return
+        val res = cloneInstaller.launchClone(clonePkg, app.launcherActivity)
+        if (res.isFailure) {
+            _uiState.update {
+                it.copy(statusBanner = "Ошибка запуска клона: ${res.exceptionOrNull()?.message}")
+            }
+        }
+    }
+
     fun switchToLocalContainer() {
         _uiState.update {
             it.copy(
                 activeCloneBridge = null,
                 bridgeNeedsRebuildApp = null,
+                bridgeNeedsLaunchApp = null,
                 bridgeErrorMessage = null
             )
         }
@@ -458,6 +487,7 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 activeCloneBridge = null,
                 bridgeNeedsRebuildApp = null,
+                bridgeNeedsLaunchApp = null,
                 bridgeErrorMessage = null
             )
         }
@@ -477,6 +507,7 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                 it.copy(
                     activeCloneBridge = bridge,
                     bridgeNeedsRebuildApp = app,
+                    bridgeNeedsLaunchApp = null,
                     bridgeErrorMessage = "Клон ${bridge.clonePackage} собран без токена файлового моста (Shim v0.2.0). Пересобери клон 1 нажатием, чтобы открыть живые файлы.",
                     currentRelativePath = "/",
                     fileItems = emptyList()
@@ -509,6 +540,7 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                         it.copy(
                             activeCloneBridge = bridge,
                             bridgeNeedsRebuildApp = null,
+                            bridgeNeedsLaunchApp = null,
                             bridgeErrorMessage = null,
                             currentRelativePath = listRes.currentPath,
                             fileItems = items
@@ -517,27 +549,47 @@ class SandboxViewModel(application: Application) : AndroidViewModel(application)
                 },
                 onFailure = { err ->
                     val app = sourceApp ?: _uiState.value.containerApps.firstOrNull { it.packageName == bridge.originalPackage }
-                    if (err is BridgeNeedsRebuildException) {
-                        AppLogger.w("FileBridge", err.message ?: "Требуется пересборка клона")
-                        _uiState.update {
-                            it.copy(
-                                activeCloneBridge = bridge,
-                                bridgeNeedsRebuildApp = app,
-                                bridgeErrorMessage = err.message,
-                                currentRelativePath = "/",
-                                fileItems = emptyList()
-                            )
+                    when (err) {
+                        is BridgeNeedsRebuildException -> {
+                            AppLogger.w("FileBridge", err.message ?: "Требуется пересборка клона")
+                            _uiState.update {
+                                it.copy(
+                                    activeCloneBridge = bridge,
+                                    bridgeNeedsRebuildApp = app,
+                                    bridgeNeedsLaunchApp = null,
+                                    bridgeErrorMessage = err.message,
+                                    currentRelativePath = "/",
+                                    fileItems = emptyList()
+                                )
+                            }
                         }
-                    } else {
-                        AppLogger.e("FileBridge", "Ошибка чтения моста ${bridge.clonePackage}", err)
-                        _uiState.update {
-                            it.copy(
-                                activeCloneBridge = bridge,
-                                bridgeNeedsRebuildApp = null,
-                                bridgeErrorMessage = err.message,
-                                fileItems = emptyList(),
-                                statusBanner = "Ошибка моста файлов: ${err.message}"
-                            )
+
+                        is BridgeProcessBlockedException -> {
+                            AppLogger.w("FileBridge", err.message ?: "Процесс клона остановлен")
+                            _uiState.update {
+                                it.copy(
+                                    activeCloneBridge = bridge,
+                                    bridgeNeedsRebuildApp = null,
+                                    bridgeNeedsLaunchApp = app,
+                                    bridgeErrorMessage = err.message,
+                                    currentRelativePath = "/",
+                                    fileItems = emptyList()
+                                )
+                            }
+                        }
+
+                        else -> {
+                            AppLogger.e("FileBridge", "Ошибка чтения моста ${bridge.clonePackage}", err)
+                            _uiState.update {
+                                it.copy(
+                                    activeCloneBridge = bridge,
+                                    bridgeNeedsRebuildApp = null,
+                                    bridgeNeedsLaunchApp = null,
+                                    bridgeErrorMessage = err.message,
+                                    fileItems = emptyList(),
+                                    statusBanner = "Ошибка моста файлов: ${err.message}"
+                                )
+                            }
                         }
                     }
                 }

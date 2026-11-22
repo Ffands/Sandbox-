@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.InsertDriveFile
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.AlertDialog
@@ -81,7 +82,8 @@ fun FileManagerScreen(
     onSwitchCloneRoot: (String) -> Unit,
     onSwitchToLocalContainer: () -> Unit,
     onClearCloneCache: () -> Unit,
-    onRebuildCloneForBridge: (ContainerApp) -> Unit
+    onRebuildCloneForBridge: (ContainerApp) -> Unit,
+    onLaunchCloneForBridge: (ContainerApp) -> Unit
 ) {
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
@@ -147,7 +149,7 @@ fun FileManagerScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        if (uiState.bridgeNeedsRebuildApp == null) {
+                        if (uiState.bridgeNeedsRebuildApp == null && uiState.bridgeNeedsLaunchApp == null) {
                             IconButton(onClick = { confirmClearCache = true }) {
                                 Icon(
                                     imageVector = Icons.Outlined.DeleteSweep,
@@ -221,6 +223,48 @@ fun FileManagerScreen(
                         }
                         OutlinedButton(onClick = onSwitchToLocalContainer) {
                             Text("Контейнер")
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        // If clone is installed with bridge, but Android 15-17 / ColorOS blocked background provider start (FLAG_STOPPED)
+        val launchApp = uiState.bridgeNeedsLaunchApp
+        if (launchApp != null) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
+                border = BorderStroke(1.dp, AccentCyan),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "Нужен первый запуск клона",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AccentCyan
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = uiState.bridgeErrorMessage
+                            ?: "Android / ColorOS блокирует фоновый мост файлов для остановленных приложений. Запусти «${launchApp.appName}» один раз и вернись сюда.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onLaunchCloneForBridge(launchApp) }) {
+                            Icon(
+                                imageVector = Icons.Outlined.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Запустить клон")
+                        }
+                        OutlinedButton(onClick = onRefresh) {
+                            Text("Обновить")
                         }
                     }
                 }

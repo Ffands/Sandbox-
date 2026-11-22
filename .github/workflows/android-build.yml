@@ -47,6 +47,12 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
+      - name: Cache persistent debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: sandboxforge-debug-keystore-v1
+
       - name: Run Unit Tests
         working-directory: android
         run: gradle testDebugUnitTest --stacktrace

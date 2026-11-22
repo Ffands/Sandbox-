@@ -92,7 +92,9 @@ fun ContainerScreen(
     onDismissReport: () -> Unit,
     onOpenAppFiles: (ContainerApp) -> Unit,
     onOpenAppFolderByPackage: (String) -> Unit,
-    onDeleteApp: (String) -> Unit
+    onDeleteApp: (String) -> Unit,
+    onUninstallClone: (String) -> Unit,
+    onDismissConflict: () -> Unit
 ) {
     val activeShims by ShimTelemetryStore.activeByOriginalPkg.collectAsState()
     var showDevicePicker by remember { mutableStateOf(false) }
@@ -134,7 +136,7 @@ fun ContainerScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Контейнер #1 (Shim v0.2.2)",
+                            text = "Контейнер #1 (Shim v0.2.3)",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -312,25 +314,65 @@ fun ContainerScreen(
     }
 
     appPendingDelete?.let { target ->
+        val clonePkg = target.clonePackageName
+        val hasInstalledClone = clonePkg != null && uiState.installedClones.contains(target.packageName)
         AlertDialog(
             onDismissRequest = { appPendingDelete = null },
             title = { Text("Удалить из контейнера?") },
             text = {
-                Text("Будут удалены скопированные APK и папка данных приложения «${target.appName}» (${target.packageName}). Оригинал на телефоне не пострадает.")
+                Text(
+                    "Будут удалены скопированные APK и папка данных приложения «${target.appName}» (${target.packageName}). Оригинал на телефоне не пострадает." +
+                        if (hasInstalledClone) "\n\nУстановленный скрытый клон ($clonePkg) можно также удалить из системы." else ""
+                )
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        appPendingDelete = null
-                        onDeleteApp(target.packageName)
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (hasInstalledClone && clonePkg != null) {
+                        TextButton(
+                            onClick = {
+                                appPendingDelete = null
+                                onUninstallClone(clonePkg)
+                            }
+                        ) {
+                            Text("Удалить клон", color = StatusAmber)
+                        }
                     }
-                ) {
-                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                    TextButton(
+                        onClick = {
+                            appPendingDelete = null
+                            onDeleteApp(target.packageName)
+                        }
+                    ) {
+                        Text("Из контейнера", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             },
             dismissButton = {
                 TextButton(onClick = { appPendingDelete = null }) {
                     Text("Отмена")
+                }
+            }
+        )
+    }
+
+    uiState.conflictingClonePackage?.let { conflictPkg ->
+        AlertDialog(
+            onDismissRequest = onDismissConflict,
+            title = { Text("Конфликт подписи клона") },
+            text = {
+                Text(
+                    "В системе уже установлен старый клон ($conflictPkg), подписанный другим локальным ключом (например, после переустановки SandboxForge).\n\n" +
+                        "Удали старый клон 1 нажатием, а затем нажми «Собрать клон» ещё раз."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { onUninstallClone(conflictPkg) }) {
+                    Text("Удалить старый клон", color = StatusAmber)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = onDismissConflict) {
+                    Text("Закрыть")
                 }
             }
         )

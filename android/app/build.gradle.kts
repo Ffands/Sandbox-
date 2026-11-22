@@ -16,8 +16,8 @@ android {
         applicationId = "com.sandboxforge.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.2-bridge-shield"
+        versionCode = 4
+        versionName = "0.2.3-bridge-fix"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

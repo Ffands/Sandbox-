@@ -207,6 +207,8 @@ object ApkManifestPatcher {
             .setValueAsString(SHIM_INIT_PROVIDER_CLASS)
         initProvider.getOrCreateAndroidAttribute("authorities", ATTR_ID_AUTHORITIES)
             .setValueAsString("$clonePackage.sandboxforge.shim")
+        initProvider.getOrCreateAndroidAttribute("enabled", ATTR_ID_ENABLED)
+            .setValueAsBoolean(true)
         initProvider.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
             .setValueAsBoolean(false)
         initProvider.getOrCreateAndroidAttribute("initOrder", ATTR_ID_INIT_ORDER)
@@ -218,6 +220,8 @@ object ApkManifestPatcher {
             .setValueAsString(SHIM_FILE_BRIDGE_CLASS)
         bridgeProvider.getOrCreateAndroidAttribute("authorities", ATTR_ID_AUTHORITIES)
             .setValueAsString(fileBridgeAuthority(clonePackage))
+        bridgeProvider.getOrCreateAndroidAttribute("enabled", ATTR_ID_ENABLED)
+            .setValueAsBoolean(true)
         bridgeProvider.getOrCreateAndroidAttribute("exported", ATTR_ID_EXPORTED)
             .setValueAsBoolean(true)
 
